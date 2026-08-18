@@ -1,0 +1,101 @@
+{
+  "name": "jpnh-desktop",
+  "productName": "Johnny Personal Network Hub",
+  "desktopName": "jpnh",
+  "version": "0.1.0",
+  "description": "Private network control center - orchestrates providers, configs, and clients.",
+  "main": "main.js",
+  "author": "Johnny",
+  "homepage": "https://github.com/johnny/personal-network-hub",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "test": "node --test test/*.test.js",
+    "build:backend": "node build/scripts/build-backend.mjs",
+    "build:backend:linux": "node build/scripts/build-backend.mjs linux",
+    "build:backend:win": "node build/scripts/build-backend.mjs win",
+    "build:network-checker": "node build/scripts/build-network-checker.mjs",
+    "build:network-checker:linux": "node build/scripts/build-network-checker.mjs linux",
+    "build:network-checker:win": "node build/scripts/build-network-checker.mjs win",
+    "icons": "python3 scripts/generate_icons.py",
+    "dist": "electron-builder",
+    "dist:linux": "node build/scripts/build-backend.mjs linux && node build/scripts/build-network-checker.mjs linux && electron-builder --linux AppImage deb",
+    "dist:win": "node build/scripts/build-backend.mjs win && node build/scripts/build-network-checker.mjs win && electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.johnny.jpnh",
+    "productName": "Johnny Network Hub",
+    "executableName": "jpnh",
+    "asar": true,
+    "directories": {
+      "output": "../dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "lib/**/*",
+      "renderer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../resources/backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../resources/network-checker",
+        "to": "network-checker",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../assets/icons/icon.png",
+        "to": "icons/icon.png"
+      }
+    ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "extraMetadata": {
+      "main": "main.js"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Network",
+      "icon": "../assets/icons/icon.png",
+      "syncDesktopName": true,
+      "synopsis": "Private network control center",
+      "description": "Johnny Personal Network Hub - a private network control center that orchestrates providers, configs, and clients.",
+      "maintainer": "Johnny <johnny@localhost>",
+      "desktop": {
+        "entry": {
+          "Name": "Johnny Network Hub",
+          "Comment": "Private network control center",
+          "Categories": "Network;Utility;",
+          "Keywords": "network;proxy;vpn;configs;",
+          "StartupWMClass": "jpnh",
+          "Terminal": "false"
+        }
+      }
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "../assets/icons/icon.ico",
+      "executableName": "jpnh"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Johnny Network Hub",
+      "installerIcon": "../assets/icons/icon.ico",
+      "uninstallerIcon": "../assets/icons/icon.ico",
+      "installerHeaderIcon": "../assets/icons/icon.ico",
+      "artifactName": "JPNH-Setup-${version}.${ext}"
+    }
+  }
+}
