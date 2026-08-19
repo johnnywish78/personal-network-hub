@@ -14,6 +14,13 @@ __pycache__/
 venv/
 dist/
 build/
+
+# Track production build source scripts
+!desktop/build/
+!desktop/build/backend_entry.py
+!desktop/build/scripts/
+!desktop/build/scripts/build-backend.mjs
+!desktop/build/scripts/build-network-checker.mjs
 .pytest_cache/
 
 # --- Node / Electron ---
