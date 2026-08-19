@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.v1 import (auth, checker, clients, cloudflare, configs, dashboard, github,
-                     network, providers, railway, services, setup, system, xray)
+                     network, providers, railway, services, setup, system, updates,
+                     xray)
 from .services.state import app_state
 from .version import get_version
 
@@ -30,8 +31,12 @@ app.add_middleware(
 
 for module in (dashboard, providers, cloudflare, railway, github,
                network, configs, xray, clients, auth, services, setup, system,
-               checker):
-    app.include_router(module.router)
+               checker, updates):
+    if hasattr(module, "router"):
+        app.include_router(module.router)
+    for router in ("projects_router", "updates_router"):
+        if hasattr(module, router):
+            app.include_router(getattr(module, router))
 
 app_state.logs.info("app", "JPNH backend loaded")
 

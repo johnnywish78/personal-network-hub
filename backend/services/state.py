@@ -18,6 +18,8 @@ from ..services.settings import Settings
 from ..storage.credential_store import CredentialStore
 from ..xray.manager import XrayManager
 from ..providers.registry import build_registry
+from ..updates.history import UpdateHistory
+from ..updates.manager import UpdateManager
 from .network_checker import network_checker_manager
 
 
@@ -34,6 +36,9 @@ class AppState:
         self.cloudflare = CloudflareClient(token_provider=lambda: self.vault.get("cloudflare_token"))
         self.railway = RailwayClient(token_provider=lambda: self.vault.get("railway_token"))
         self.github = GitHubClient(token_provider=lambda: self.vault.get("github_token"))
+        self.update_history = UpdateHistory()
+        self.updates = UpdateManager(
+            log=lambda level, source, message: self.logs.log(level, source, message))
 
     def client_status(self) -> list[dict]:
         return detect_clients(self.settings.get("client_paths"))

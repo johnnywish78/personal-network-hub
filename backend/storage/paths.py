@@ -58,3 +58,29 @@ def log_entries_path() -> Path:
 
 def logs_path() -> Path:
     return ensure_data_dir() / "logs"
+
+
+def backups_dir() -> Path:
+    d = ensure_data_dir() / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def projects_dir() -> Path:
+    d = ensure_data_dir() / "projects"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def update_cache_dir() -> Path:
+    d = ensure_data_dir() / "update-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def update_state_path() -> Path:
+    return ensure_data_dir() / "updates.json"
+
+
+def update_history_path() -> Path:
+    return ensure_data_dir() / "update_history.json"

@@ -9,6 +9,7 @@
     { id: "network", label: "Network", icon: "⛨" },
     { id: "configs", label: "Configs", icon: "⚙" },
     { id: "xray", label: "Xray", icon: "◎" },
+    { id: "updates", label: "Updates", icon: "⇅" },
     { id: "clients", label: "Clients", icon: "▣" },
     { id: "settings", label: "Settings", icon: "⚑" },
   ];

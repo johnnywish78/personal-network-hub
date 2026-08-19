@@ -25,8 +25,10 @@ def redact(text: str) -> str:
     # vless://uuid@host -> vless://REDACTED@host
     text = re.sub(r"(vless|vmess|trojan|ss|hysteria2|hy2)://[^@\s]+@",
                   r"\1://REDACTED@", text)
+    # generic URL userinfo (proxies, tokens) -> https://REDACTED@host
+    text = re.sub(r"(https?://)[^@\s/]+@", r"\1REDACTED@", text)
     # query parameters that carry secrets
-    for param in ("password", "privatekey", "obfs-password"):
+    for param in ("password", "privatekey", "obfs-password", "token", "auth"):
         text = re.sub(rf"({param}=)[^&\s]+", r"\1REDACTED", text, flags=re.IGNORECASE)
     return text
 

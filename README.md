@@ -25,6 +25,7 @@ validates, tests, stores, exports, and hands off configurations to those clients
 | **Configs** | Import/parse/validate/test/save/export configs + QR, rename/tag/duplicate/group |
 | **Xray** | Detect, start/stop/restart, validate config (fully optional) |
 | **Clients** | Detect v2rayN / Hiddify / V2Box and set executable paths |
+| **Updates** | Update Manager + Project Manager — check, dry-run, backup, and update JPNH core and managed components (GUI, API, and CLI) |
 | **Settings** | Theme (light/dark), masked credential overview |
 
 Manager views (Providers, Cloudflare, Railway, GitHub) are reachable from the
@@ -56,6 +57,15 @@ Services page.
   SNI Spoof Check, Cloudflare Fix, and the Chain generator.
 - **Credential store** (`backend/storage/credential_store.py`) — prefers the OS
   keyring when available, falls back to a 0600 local vault.
+- **Update Manager** (`backend/updates/`) — versioned, backed-up, health-checked
+  updates for JPNH core and managed projects. A **Project/Component Registry**
+  (`backend/updates/registry.py`) is the single source of truth; built-ins are
+  `jpnh-core` (download + validate + stage; never hot-swaps a running checkout)
+  and `network-checker` (the vendored Flutter app), and additional projects can
+  be added as user manifests in `<data_dir>/projects/*.json`. Every apply takes
+  a state+project **backup**, and any failure (apply, build, or health check)
+  triggers an **automatic rollback**. Git commands are never required — upstream
+  sources are fetched as GitHub tarballs and verified by content hash.
 
 ```
 personal-network-hub/
@@ -65,6 +75,7 @@ personal-network-hub/
 │   ├── network/           # dns, tcp, tls, latency, diagnostics, config_test
 │   ├── configs/           # parser, normalizer, validator, storage, exporter
 │   ├── xray/              # detector, manager, validator
+│   ├── updates/           # update manager, registry, sources, backup/rollback
 │   ├── services/          # state, settings, vault access, logging, history,
 │   │                      # network_checker (bundle resolution)
 │   └── storage/           # paths, atomic JSON store, secret vault
@@ -99,6 +110,55 @@ backend on `http://127.0.0.1:8765`, and opens the desktop app.
 # Desktop only (requires backend running, or it will try to start it)
 cd desktop && npx electron . --no-sandbox
 ```
+
+## Update Manager
+
+The **Updates** view manages JPNH core and every project/component in the
+registry. All operations are also exposed over the API (`/updates`,
+`/projects`) and a CLI that does not need the backend running.
+
+```bash
+# from anywhere in the checkout (repo root is auto-added to sys.path)
+.venv/bin/python -m backend.updates.cli check          # live check, no changes
+.venv/bin/python -m backend.updates.cli dry-run        # plan updates, no changes
+.venv/bin/python -m backend.updates.cli dry-run <id>   # one project
+.venv/bin/python -m backend.updates.cli status         # local state overview
+.venv/bin/python -m backend.updates.cli update <id>    # update one project
+.venv/bin/python -m backend.updates.cli update-all     # update all safe projects
+.venv/bin/python -m backend.updates.cli history        # update history
+.venv/bin/python -m backend.updates.cli backups        # list backups
+.venv/bin/python -m backend.updates.cli rollback <backup_id>
+```
+
+Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
+`update`, `update:all`, `update:history`, `update:backups`.
+
+### How it works
+
+- **Registry is the source of truth.** Built-ins are `jpnh-core` (this app) and
+  `network-checker` (the vendored Flutter app, install path
+  `third_party/network-checker`, version detected from `pubspec.yaml`, rebuilt
+  with `build-network-checker.mjs`). Additional projects live in
+  `<data_dir>/projects/*.json`; malformed manifests are skipped and reported
+  rather than crashing.
+- **No git required.** Upstream sources are fetched as GitHub tarballs,
+  fingerprint-checked, and extracted; a `.jpnh-update.json` metadata file
+  records the applied ref/version and is excluded from fingerprints.
+- **Safe by default.**
+  - `jpnh-core` updates are always staged: downloaded, validated, and health-checked,
+    then applied on the next launch — a running checkout is never hot-swapped.
+  - Untracked or locally-modified installs require explicit confirmation and
+    are skipped by `update-all`.
+  - Every apply creates a backup (state files + project copy, credential *keys*
+    only — never secret values) under `<data_dir>/backups/<project>-<timestamp>/`.
+  - Apply, build, or health-check failures trigger an automatic rollback to the
+    latest backup. Manual rollback is available via CLI/API/GUI.
+- **Health checks** include required-files presence and a live backend API ping;
+  for `network-checker` the bundle is also verified as a runnable Flutter asset.
+- **VPN / proxy note.** JPNH has no built-in VPN and does not require one.
+  Upstream checks honour standard proxy environment variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), so you can activate a
+  terminal proxy before running `update:check`.
 
 ## Production packaging
 
