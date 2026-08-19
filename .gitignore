@@ -1,0 +1,36 @@
+# --- Secrets (NEVER commit these) ---
+.env
+*.env
+!*.env.example
+~/.jpnh/
+.jpnh/
+**/secrets.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+
+# --- Node / Electron ---
+node_modules/
+desktop/node_modules/
+dist-electron/
+
+# --- Local data ---
+*.log
+.DS_Store
+
+# --- Build artifacts ---
+resources/backend/
+resources/network-checker/
+third_party/network-checker/build/
+third_party/network-checker/.dart_tool/
+third_party/network-checker/.flutter-plugins*
+
+.idea/
+third_party/network-checker/android/app/src/main/jniLibs/arm64-v8a/libxray.so

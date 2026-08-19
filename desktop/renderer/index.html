@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https: http:; child-src https: http:;" />
+  <title>Johnny Personal Network Hub</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-avatar" src="assets/avatar.jpg" alt="JPNH" />
+        <div class="brand-text">
+          <strong>Network Hub</strong>
+          <small>Control Center</small>
+        </div>
+      </div>
+      <nav id="nav"></nav>
+      <div class="sidebar-foot">
+        <span id="uptime" class="sidebar-status muted">uptime: --</span>
+        <span id="backend-status" class="sidebar-status muted">backend: connecting…</span>
+        <span id="app-version" class="sidebar-version"></span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h1 id="view-title">Dashboard</h1>
+        <div id="clock" class="topbar-center">
+          <span id="clock-weekday" class="clock-item"></span>
+          <span id="clock-date" class="clock-item"></span>
+          <span id="clock-time" class="clock-item clock-time"></span>
+        </div>
+        <div class="topbar-actions">
+          <button id="btn-theme" class="btn ghost" title="Toggle dark / light theme">☀</button>
+          <button id="btn-refresh" class="btn ghost" title="Refresh">⟳ Refresh</button>
+          <button id="btn-logs" class="btn ghost" title="View logs">Logs</button>
+        </div>
+      </header>
+      <div id="view" class="view"></div>
+    </main>
+  </div>
+
+  <div id="log-modal" class="modal-overlay hidden">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <h3>Activity Log</h3>
+        <button id="btn-log-close" class="btn ghost">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="log-filters">
+          <button class="btn chip active" data-level="">All</button>
+          <button class="btn chip" data-level="INFO">INFO</button>
+          <button class="btn chip" data-level="SUCCESS">SUCCESS</button>
+          <button class="btn chip" data-level="WARNING">WARNING</button>
+          <button class="btn chip" data-level="ERROR">ERROR</button>
+          <span class="spacer"></span>
+          <button id="btn-log-clear" class="btn ghost">Clear</button>
+          <button id="btn-log-export" class="btn ghost">Export</button>
+        </div>
+        <pre id="log-content" class="log-view"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="components/theme.js"></script>
+  <script src="state/api.js"></script>
+  <script src="components/ui.js"></script>
+  <script src="views/browser.js"></script>
+  <script src="views/dashboard.js"></script>
+  <script src="views/services.js"></script>
+  <script src="views/providers.js"></script>
+  <script src="views/cloudflare.js"></script>
+  <script src="views/railway.js"></script>
+  <script src="views/github.js"></script>
+  <script src="views/network.js"></script>
+  <script src="views/checker.js"></script>
+  <script src="views/configs.js"></script>
+  <script src="views/xray.js"></script>
+  <script src="views/clients.js"></script>
+  <script src="views/settings.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
