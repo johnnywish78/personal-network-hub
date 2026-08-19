@@ -144,6 +144,18 @@ Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
 - **No git required.** Upstream sources are fetched as GitHub tarballs,
   fingerprint-checked, and extracted; a `.jpnh-update.json` metadata file
   records the applied ref/version and is excluded from fingerprints.
+- **Status model.** A component is `up-to-date`, `update-available`,
+  `installed` (present but not yet managed — the first update backs it up and
+  tracks it), `missing` (not installed), `no-stable-release` (reachable, but
+  no stable release or tag is published — never applied), `disabled`,
+  `error`, or `newer-than-remote`. Plans carry a `note` when the upstream
+  cannot be resolved to a stable release.
+- **Honest error messages.** Upstream problems are classified instead of
+  guessed: missing/private repositories report "repository not found or not
+  publicly accessible", rate limits and auth rejections are called out
+  separately, server errors and unparseable responses are distinguished, and
+  every tarball member is checked against path traversal and symlink escape
+  before extraction.
 - **Safe by default.**
   - `jpnh-core` updates are always staged: downloaded, validated, and health-checked,
     then applied on the next launch — a running checkout is never hot-swapped.
@@ -196,6 +208,11 @@ Individual steps: `npm run build:backend` (PyInstaller),
 - **No secrets in the frontend.** The API only returns *masked* key presence.
 - **No secrets in logs.** The log hub redacts URIs before writing.
 - API tokens are read from the vault at request time and never logged.
+- **Update downloads are treated as untrusted.** Tarballs are fetched over TLS,
+  extracted with path-traversal and symlink/hardlink escape checks, and
+  fingerprints never include the `.jpnh-update.json` metadata file.
+- **Proxy configuration is never hard-coded.** Proxies come from environment
+  variables only; invalid proxy schemes fall back to a direct connection.
 
 ## Config status
 

@@ -3,7 +3,7 @@
 import socket
 
 from backend.network import dns, latency, tcp
-from backend.network.config_test import test_config as run_config_test
+from backend.network.config_test import run_config_test
 from backend.configs import parser
 from backend.configs.normalizer import normalize
 

@@ -8,9 +8,11 @@ window.Views = window.Views || {};
 const UPDATE_STATUS_LABEL = {
   "up-to-date": "✓ Up to date",
   "update-available": "Update available",
-  untracked: "Untracked install",
+  installed: "Installed (not yet managed)",
+  missing: "Not installed",
   disabled: "Disabled",
   error: "⚠ Update failed",
+  "no-stable-release": "No stable release",
   "newer-than-remote": "Local ahead of remote",
   staged: "Staged — restart to apply",
   unknown: "Unknown",
@@ -20,9 +22,11 @@ function statusBadge(status) {
   const cls = {
     "up-to-date": "ok",
     "update-available": "warn",
-    untracked: "warn",
+    installed: "warn",
+    missing: "muted",
     disabled: "muted",
     error: "bad",
+    "no-stable-release": "muted",
     "newer-than-remote": "ok",
     staged: "ok",
     unknown: "muted",
@@ -89,7 +93,12 @@ function projectCard(project, { onChanged, busy }) {
     card.appendChild(warn);
   } else if (project.local_changes && project.local_changes.detected === null) {
     card.appendChild(el("div", "meta warn mt",
-      "Installation is not tracked by the update manager. An update will record and sync it."));
+      "Installed, but not yet managed by the update manager. The first update backs it up and tracks it."));
+  }
+
+  if (project.status === "no-stable-release") {
+    card.appendChild(el("div", "meta mt",
+      project.note || "Repository reachable, but no stable release is published."));
   }
 
   if (project.error) {
@@ -99,7 +108,7 @@ function projectCard(project, { onChanged, busy }) {
   const actions = el("div", "actions");
   const canUpdate = project.enabled &&
     project.source_type !== "none" &&
-    ["update-available", "untracked", "unknown", "newer-than-remote", "error"].includes(project.status);
+    ["update-available", "installed", "unknown", "newer-than-remote", "error"].includes(project.status);
 
   if (canUpdate && !busy) {
     const btn = el("button", "btn small primary", "Update");
@@ -121,8 +130,12 @@ function projectCard(project, { onChanged, busy }) {
 function updateProject(project, onChanged) {
   const { toast, confirmDialog } = window.ui;
   const localChanged = project.local_changes && project.local_changes.detected;
-  const confirmMessage = localChanged
-    ? `Local changes were detected in "${project.name}". Updating may overwrite them.\n\nDo you want to continue?`
+  const unmanaged = project.status === "installed" || project.status === "unknown";
+  const needsConfirm = localChanged || unmanaged;
+  const confirmMessage = needsConfirm
+    ? `"${project.name}" is not yet managed by the update manager or has local changes. ` +
+      "Updating backs it up first, then may overwrite existing files.\n\n" +
+      "Do you want to continue?"
     : `Update "${project.name}" to the available version?`;
 
   const doUpdate = async (confirm) => {
@@ -141,7 +154,7 @@ function updateProject(project, onChanged) {
     }
   };
 
-  if (localChanged) {
+  if (needsConfirm) {
     confirmDialog(`Update ${project.name}`, confirmMessage, () => doUpdate(true));
   } else {
     doUpdate(false);
@@ -234,11 +247,18 @@ window.Views.updates = {
       actions.appendChild(btnCheck);
 
       const btnAll = el("button", "btn primary", "Update All");
-      btnAll.addEventListener("click", async () => {
-        busy = true; renderAll();
-        try { await updateAll(renderAll); }
-        catch (err) { toast(err.message, "bad"); }
-        busy = false; renderAll();
+      btnAll.addEventListener("click", () => {
+        window.ui.confirmDialog(
+          "Update All",
+          "Update every managed project that is safe to update.\n\n" +
+          "Projects with local changes, unmanaged installs, development-only builds, " +
+          "or no stable release are skipped and reported — never silently overwritten.",
+          async () => {
+            busy = true; renderAll();
+            try { await updateAll(renderAll); }
+            catch (err) { toast(err.message, "bad"); }
+            busy = false; renderAll();
+          });
       });
       actions.appendChild(btnAll);
 

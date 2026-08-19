@@ -89,10 +89,17 @@ class GitHubSource(UpdateSource):
         except httpx.HTTPError as exc:
             raise UpdateSourceError(_network_message(exc)) from exc
         if resp.status_code in (401, 403):
-            raise UpdateSourceError("GitHub rejected the request (rate limit or auth). "
-                                    "Retry later or set a GitHub token in the vault.")
+            raise UpdateSourceError(
+                "GitHub rejected the request (rate limit or missing auth). "
+                "Retry later or set a GitHub token in the vault.")
+        if resp.status_code == 429:
+            raise UpdateSourceError(
+                "GitHub rate limit reached. Retry in a few minutes.")
         if resp.status_code == 404:
             raise UpdateSourceError(f"GitHub resource not found: {url.split('/repos/')[-1]}")
+        if 500 <= resp.status_code < 600:
+            raise UpdateSourceError(
+                f"GitHub server error (HTTP {resp.status_code}) for {url.split('/repos/')[-1]}")
         if resp.status_code != 200:
             raise UpdateSourceError(f"GitHub returned HTTP {resp.status_code} for {url}")
         try:
@@ -123,13 +130,18 @@ class GitHubSource(UpdateSource):
                                 "published_at": None, "url": f"https://github.com/{repo}",
                                 "development": False}
 
-        default_branch = manifest.branch
+        # Always verify the repository itself first. This makes error
+        # classification unambiguous: a missing/private repository, an auth or
+        # rate-limit rejection, and a network/proxy failure are each reported
+        # distinctly, never as a misleading "commits/ref not found".
         try:
             repo_data = self.api_json(self._repo_api(repo, ""))
-            default_branch = default_branch or repo_data.get("default_branch")
-        except UpdateSourceError:
-            if not default_branch:
-                raise
+        except UpdateSourceError as exc:
+            if "resource not found" in str(exc):
+                raise UpdateSourceError(
+                    f"repository not found or not publicly accessible: {repo}") from exc
+            raise
+        default_branch = manifest.branch or repo_data.get("default_branch")
 
         if manifest.tag:
             info.update(self._tag_info(repo, manifest.tag, default_branch))
@@ -137,29 +149,36 @@ class GitHubSource(UpdateSource):
             return info
 
         if manifest.release_only:
+            # 1. stable release
             try:
                 release = self.api_json(self._repo_api(repo, "/releases/latest"))
                 tag = release.get("tag_name")
+                if not tag:
+                    raise UpdateSourceError("release has no tag")
                 info.update(self._tag_info(repo, tag, default_branch, release=release))
                 self._attach_file_version(manifest, info)
                 return info
             except UpdateSourceError:
-                try:
-                    tags = self.api_json(self._repo_api(repo, "/tags"), params={"per_page": 10})
-                    if tags:
-                        tag = tags[0].get("name")
-                        info.update(self._tag_info(repo, tag, default_branch))
-                        self._attach_file_version(manifest, info)
-                        return info
-                except UpdateSourceError:
-                    pass
-                # Clearly defined fallback: stable branch head, marked as a
-                # development build. Never silently mixed with stable updates.
-                info.update(self._head_commit(repo, default_branch or "main"))
-                info["development"] = True
-                info["version"] = None
+                pass
+            # 2. stable tag
+            try:
+                tags = self.api_json(self._repo_api(repo, "/tags"), params={"per_page": 10})
+            except UpdateSourceError:
+                tags = []
+            if tags:
+                tag = tags[0].get("name")
+                info.update(self._tag_info(repo, tag, default_branch))
                 self._attach_file_version(manifest, info)
                 return info
+            # 3. clearly defined stable-branch fallback: report it, never
+            # silently present a branch head as a stable release.
+            info["development"] = True
+            info["version"] = None
+            info["note"] = ("Repository reachable, but no stable release is published. "
+                            "The default branch head is a development build.")
+            info.update(self._head_commit(repo, default_branch or "main"))
+            self._attach_file_version(manifest, info)
+            return info
 
         commit = self._head_commit(repo, default_branch)
         info.update(commit)
@@ -209,7 +228,14 @@ class GitHubSource(UpdateSource):
         return info
 
     def _head_commit(self, repo: str, ref: str) -> dict[str, Any]:
-        data = self.api_json(self._repo_api(repo, f"/commits/{ref}"))
+        if not ref:
+            raise UpdateSourceError(f"no default branch resolved for {repo}")
+        try:
+            data = self.api_json(self._repo_api(repo, f"/commits/{ref}"))
+        except UpdateSourceError as exc:
+            if "resource not found" in str(exc):
+                raise UpdateSourceError(f"branch or ref '{ref}' not found in {repo}") from exc
+            raise
         return {"ref": data.get("sha"),
                 "ref_type": "commit",
                 "version": None,
@@ -233,7 +259,14 @@ class GitHubSource(UpdateSource):
         try:
             with self._http.stream("GET", url) as resp:
                 if resp.status_code == 404:
-                    raise UpdateSourceError(f"archive not found for {repo}@{ref}")
+                    raise UpdateSourceError(f"archive not found for {repo}@{ref} "
+                                            "(release/tag may have been removed)")
+                if resp.status_code in (401, 403):
+                    raise UpdateSourceError(
+                        "GitHub rejected the archive download (rate limit or auth). "
+                        "Retry later or set a GitHub token in the vault.")
+                if resp.status_code == 429:
+                    raise UpdateSourceError("GitHub rate limit reached. Retry in a few minutes.")
                 if resp.status_code != 200:
                     raise UpdateSourceError(
                         f"download failed for {repo}@{ref} (HTTP {resp.status_code})")
@@ -310,7 +343,8 @@ def _extract_tarball(archive: Path, dest: Path) -> None:
         with tarfile.open(archive, "r:gz") as tar:
             for member in tar.getmembers():
                 _safe_member(member)
-            try:  # Python >= 3.12
+            try:  # Python >= 3.12: "data" filter blocks traversal, symlinks,
+                  # hardlinks, absolute paths, and device/special files.
                 tar.extractall(dest, filter="data")
             except TypeError:  # pragma: no cover - older Pythons
                 tar.extractall(dest)
@@ -322,6 +356,8 @@ def _safe_member(member: tarfile.TarInfo) -> None:
     name = member.name
     if name.startswith("/") or ".." in Path(name).parts:
         raise UpdateSourceError("downloaded archive contains an unsafe path")
+    if member.issym() or member.islnk():
+        raise UpdateSourceError("downloaded archive contains a symlink or hard link")
 
 
 def _first_subdir(staging: Path) -> Optional[Path]:
@@ -407,7 +443,12 @@ def parse_version_from_file(path: Path) -> Optional[str]:
 
 
 def parse_version_text(text: str, filename: str = "") -> Optional[str]:
-    """Extract a version string from raw file content (VERSION or YAML)."""
+    """Extract a version string from raw file content (VERSION or YAML).
+
+    pubspec versions may carry build metadata (``1.6.0+123``) or a ``v``
+    prefix; both are normalized so the build suffix never changes a version.
+    Malformed values return ``None`` instead of a bogus version.
+    """
     if not text:
         return None
     if filename in ("pubspec.yaml", "pubspec.lock") or filename.endswith((".yaml", ".yml")):
@@ -415,8 +456,19 @@ def parse_version_text(text: str, filename: str = "") -> Optional[str]:
             line = line.strip()
             if line.startswith("version:") and " " in line:
                 value = line.split(":", 1)[1].strip()
-                # drop flutter +build metadata, keep the semver core
-                return value.split("+")[0] if value else None
+                value = value.split("+")[0].strip()
+                return _normalize_version(value)
         return None
     first = text.splitlines()[0].strip() if text.splitlines() else None
-    return first or None
+    return _normalize_version(first) if first else None
+
+
+def _normalize_version(value: str) -> Optional[str]:
+    """Strip prefixes/build metadata and validate the semver core."""
+    from .versions import Version, strip_tag
+    if not value:
+        return None
+    norm = strip_tag(value)
+    if not norm or not Version(norm):
+        return None
+    return norm

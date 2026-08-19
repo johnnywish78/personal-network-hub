@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -23,7 +24,8 @@ from backend.updates.manifest import ProjectManifest
 from backend.updates.registry import ProjectRegistry
 from backend.updates.sources import (GitHubSource, LocalSource,
                                      UpdateSource, UpdateSourceError,
-                                     _build_client, parse_version_from_file)
+                                     _build_client, parse_version_from_file,
+                                     parse_version_text)
 from backend.updates.state import UpdateState
 from backend.updates.versions import Version, compare_versions, strip_tag
 
@@ -115,6 +117,17 @@ def make_manager(tmp_path, manifest, source=None, log=None):
 # version comparison
 # ---------------------------------------------------------------------------
 
+def test_version_sources_are_consistent():
+    """VERSION file is the single source of truth; the desktop package and the
+    backend must not drift away from it."""
+    from backend.version import get_version
+    repo_root = Path(__file__).resolve().parents[1]
+    version_file = (repo_root / "VERSION").read_text(encoding="utf-8").strip()
+    assert get_version() == version_file
+    pkg = json.loads((repo_root / "desktop" / "package.json").read_text(encoding="utf-8"))
+    assert pkg["version"] == version_file
+
+
 def test_version_parsing_and_compare():
     assert Version("1.2.3").parts == (1, 2, 3)
     assert Version("v2.0.0").parts == (2, 0, 0)
@@ -129,6 +142,36 @@ def test_version_parsing_and_compare():
 def test_strip_tag():
     assert strip_tag("v1.2.3") == "1.2.3"
     assert strip_tag("jpnh-0.1.0") == "0.1.0"
+
+
+def test_version_compare_ignores_build_metadata():
+    # Flutter "+build" metadata must never change the version comparison.
+    assert compare_versions("1.6.0", "1.6.0+123") == 0
+    assert compare_versions("1.6.0+1", "1.6.0") == 0
+    assert compare_versions("1.6.0", "1.6.0+build42") == 0
+    assert compare_versions("1.5.0", "1.6.0+1") == -1
+    assert compare_versions("v1.6.0", "1.6.0") == 0
+    assert compare_versions("v1.6.0", "1.6.0+7") == 0
+
+
+def test_parse_version_text_variants():
+    cases = [
+        ("version: 1.5.0", "1.5.0"),
+        ("version: 1.6.0", "1.6.0"),
+        ("version: 1.6.0+1", "1.6.0"),
+        ("version: v1.6.0", "1.6.0"),
+        ("version: 1.6.0+abc", "1.6.0"),
+        ("version: garbage", None),
+        ("version: ", None),
+        ("name: x\nversion: 0.9.0\n", "0.9.0"),
+        ("", None),
+    ]
+    for text, expected in cases:
+        assert parse_version_text(text, "pubspec.yaml") == expected, text
+    # non-yaml file: first line is the version
+    assert parse_version_text("0.1.0\n", "VERSION") == "0.1.0"
+    assert parse_version_text("garbage\n", "VERSION") is None
+    assert parse_version_text("v0.2.0\n", "VERSION") == "0.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +347,52 @@ def test_dry_run_all(tmp_path):
     assert any(p["project_id"] == "demo" for p in result["plans"])
 
 
+def test_no_stable_release_status(tmp_path):
+    root, manifest = make_project(tmp_path, extra={"release_only": True})
+    source = FakeSource(available={
+        "ref": "abcdef012345", "ref_type": "commit", "version": None,
+        "release_tag": None, "published_at": None, "url": "x",
+        "development": True,
+        "note": "Repository reachable, but no stable release is published.",
+    })
+    manager = make_manager(tmp_path, manifest, source=source)
+    plan = manager.check("demo")
+    assert plan["status"] == "no-stable-release"
+    assert plan["would_update"] is False
+    assert plan["requires_confirmation"] is True
+    assert "no stable release" in (plan["note"] or "")
+
+    result = manager.update("demo", confirm=True)
+    assert result["ok"] is False
+    assert result["result"] == "no-stable-release"
+    # a development build is never applied; the install is untouched
+    assert (root / "components" / "demo" / "VERSION").read_text() == "1.0.0"
+    # update-all reports it without attempting an update
+    res = manager.update_all(confirm=True)
+    entry = [s for s in res["summary"] if s["project_id"] == "demo"][0]
+    assert entry["status"] == "no-stable-release"
+
+
+def test_missing_status(tmp_path):
+    root, manifest = make_project(tmp_path)
+    install_dir = root / "components" / "demo"
+    shutil.rmtree(install_dir)
+    manager = make_manager(tmp_path, manifest, source=FakeSource())
+    plan = manager.check("demo")
+    assert plan["status"] == "missing"
+    assert plan["would_update"] is True
+    assert plan["requires_confirmation"] is True
+
+
+def test_installed_status_for_unmanaged_install(tmp_path):
+    root, manifest = make_project(tmp_path)
+    manager = make_manager(tmp_path, manifest, source=FakeSource())
+    plan = manager.check("demo")
+    assert plan["status"] == "installed"
+    assert plan["would_update"] is True
+    assert plan["requires_confirmation"] is True
+
+
 # ---------------------------------------------------------------------------
 # successful update
 # ---------------------------------------------------------------------------
@@ -426,9 +515,8 @@ def test_update_all_summary(tmp_path):
     registry = ProjectRegistry()
     registry.register(manifest)
 
-    # unsafe project (untracked) -> skipped
-    unsafe_root = tmp_path / "root2"
-    unsafe_dir = unsafe_root / "components" / "unsafe"
+    # unsafe project (installed but unmanaged) -> skipped
+    unsafe_dir = root / "components" / "unsafe"
     unsafe_dir.mkdir(parents=True)
     (unsafe_dir / "VERSION").write_text("1.0.0")
     unsafe_manifest = ProjectManifest.from_dict({
@@ -452,7 +540,7 @@ def test_update_all_summary(tmp_path):
     summary = {s["project_id"]: s for s in result["summary"]}
     assert summary["demo"]["status"] == "success"
     assert summary["unsafe"]["status"] == "skipped"
-    assert "untracked" in summary["unsafe"]["error"]
+    assert "not tracked" in summary["unsafe"]["error"]
 
 
 def test_update_all_dry_run_no_changes(tmp_path):
@@ -553,10 +641,15 @@ def fake_api_json(transport):
 
     def api_json(url, params=None):
         resp = transport.get(url, params=params)
+        if resp.status_code in (401, 403):
+            raise UpdateSourceError("GitHub rejected the request (rate limit or auth). "
+                                    "Retry later or set a GitHub token in the vault.")
+        if resp.status_code == 429:
+            raise UpdateSourceError("GitHub rate limit reached. Retry in a few minutes.")
         if resp.status_code == 404:
             raise UpdateSourceError("GitHub resource not found")
-        if resp.status_code == 401 or resp.status_code == 403:
-            raise UpdateSourceError("GitHub rejected the request")
+        if 500 <= resp.status_code < 600:
+            raise UpdateSourceError(f"GitHub server error (HTTP {resp.status_code})")
         if resp.status_code != 200:
             raise UpdateSourceError(f"GitHub returned HTTP {resp.status_code}")
         return resp.json()
@@ -615,6 +708,83 @@ def test_github_source_not_found_error():
             "id": "xx", "name": "x", "source_type": "github", "repository": "a/b",
             "branch": "main"}))
     assert "not found" in str(exc.value)
+    assert "not publicly accessible" in str(exc.value)
+
+
+def test_github_source_reachable_no_release(tmp_path):
+    repo = "owner/demo"
+    responses = {
+        f"https://api.github.com/repos/{repo}": _FakeResponse(200, {"default_branch": "main"}),
+        f"https://api.github.com/repos/{repo}/releases/latest": _FakeResponse(404),
+        f"https://api.github.com/repos/{repo}/tags": _FakeResponse(200, []),
+        f"https://api.github.com/repos/{repo}/commits/main": _FakeResponse(200, {"sha": "feedface1234"}),
+    }
+    transport = FakeGithubTransport(responses)
+    source = GitHubSource(http=transport)
+    source.api_json = fake_api_json(transport)
+    source.raw_file = lambda repo, ref, path: None
+    manifest = ProjectManifest.from_dict({
+        "id": "demo", "name": "Demo", "source_type": "github",
+        "repository": repo, "release_only": True,
+    })
+    info = source.check_available(manifest)
+    assert info["development"] is True
+    assert info["ref"] == "feedface1234"
+    assert info["version"] is None
+    assert "no stable release" in (info.get("note") or "")
+
+
+def test_github_source_branch_not_found():
+    repo = "owner/demo"
+    responses = {
+        f"https://api.github.com/repos/{repo}": _FakeResponse(200, {"default_branch": "main"}),
+        f"https://api.github.com/repos/{repo}/commits/main": _FakeResponse(404),
+    }
+    transport = FakeGithubTransport(responses)
+    source = GitHubSource(http=transport)
+    source.api_json = fake_api_json(transport)
+    with pytest.raises(UpdateSourceError) as exc:
+        source.check_available(ProjectManifest.from_dict({
+            "id": "demo", "name": "Demo", "source_type": "github",
+            "repository": repo}))
+    assert "branch or ref" in str(exc.value)
+
+
+def test_github_source_rate_limit_and_server_errors():
+    repo = "owner/demo"
+    cases = [
+        (429, "rate limit"),
+        (403, "rejected"),
+        (500, "server error"),
+        (503, "server error"),
+    ]
+    for status, expected in cases:
+        transport = FakeGithubTransport({
+            f"https://api.github.com/repos/{repo}": _FakeResponse(status),
+        })
+        source = GitHubSource(http=transport)
+        source.api_json = fake_api_json(transport)
+        with pytest.raises(UpdateSourceError) as exc:
+            source.check_available(ProjectManifest.from_dict({
+                "id": "demo", "name": "Demo", "source_type": "github",
+                "repository": repo}))
+        assert expected in str(exc.value).lower(), (status, str(exc.value))
+
+
+def test_github_source_malformed_json():
+    repo = "owner/demo"
+    source = GitHubSource(http=FakeGithubTransport({}))
+
+    class BadJson:
+        status_code = 200
+        def json(self):
+            raise ValueError("no json")
+    source._http.get = lambda url, **kw: BadJson()
+    with pytest.raises(UpdateSourceError) as exc:
+        source.check_available(ProjectManifest.from_dict({
+            "id": "demo", "name": "Demo", "source_type": "github",
+            "repository": repo}))
+    assert "unparseable" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +866,94 @@ def test_parse_pubspec_version(tmp_path):
     v = tmp_path / "VERSION"
     v.write_text("0.2.0\n")
     assert parse_version_from_file(v) == "0.2.0"
+
+
+# ---------------------------------------------------------------------------
+# malicious archives
+# ---------------------------------------------------------------------------
+
+def _make_tar(tmp_path, members):
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, content, kind in members:
+            if kind == "dir":
+                info = tarfile.TarInfo(name)
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            elif kind == "symlink":
+                info = tarfile.TarInfo(name)
+                info.type = tarfile.SYMTYPE
+                info.linkname = content
+                tar.addfile(info)
+            else:
+                data = content.encode()
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    buf.seek(0)
+    path = tmp_path / "bad.tar.gz"
+    path.write_bytes(buf.read())
+    return path
+
+
+def test_build_scripts_refuse_win_cross_compile():
+    """Flutter/PyInstaller cannot cross-compile for Windows on Linux; the build
+    scripts must refuse rather than silently producing a broken bundle."""
+    if sys.platform == "win32":
+        pytest.skip("only meaningful on non-Windows hosts")
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        pytest.skip("node not available")
+    root = Path(__file__).resolve().parents[1]
+    for script in ("build-backend.mjs", "build-network-checker.mjs"):
+        r = subprocess.run(
+            ["node", str(root / "desktop" / "build" / "scripts" / script), "win"],
+            capture_output=True, text=True)
+        assert r.returncode != 0, f"{script} should refuse win-on-linux"
+        assert "cannot cross-compile" in (r.stderr + r.stdout).lower(), script
+
+
+def test_extract_rejects_path_traversal(tmp_path):
+    from backend.updates.sources import _extract_tarball
+    archive = _make_tar(tmp_path, [("../escape.txt", "pwned", "file")])
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(UpdateSourceError):
+        _extract_tarball(archive, dest)
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_extract_rejects_symlink(tmp_path):
+    from backend.updates.sources import _extract_tarball
+    archive = _make_tar(tmp_path, [("link", "/etc/passwd", "symlink")])
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(UpdateSourceError):
+        _extract_tarball(archive, dest)
+
+
+def test_extract_rejects_absolute_path(tmp_path):
+    from backend.updates.sources import _extract_tarball
+    archive = _make_tar(tmp_path, [("/tmp/abs-write", "x", "file")])
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(UpdateSourceError):
+        _extract_tarball(archive, dest)
+
+
+def test_extract_accepts_normal_tree(tmp_path):
+    from backend.updates.sources import _extract_tarball
+    archive = _make_tar(tmp_path, [
+        ("repo/pubspec.yaml", "version: 9.9.9\n", "file"),
+        ("repo/lib/main.dart", "void main(){}", "file"),
+    ])
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _extract_tarball(archive, dest)
+    assert (dest / "repo" / "pubspec.yaml").read_text().startswith("version:")
 
 
 def test_local_source_rejects_update():
@@ -780,6 +1038,28 @@ def test_api_dry_run_uses_state_updates(api_client, monkeypatch):
     assert r.status_code == 200
     plans = {p["project_id"]: p for p in r.json()["plans"]}
     assert plans["jpnh-core"]["available"]["version"] == "9.0.0"
+
+
+def test_api_update_unsafe_requires_confirmation(api_client, monkeypatch):
+    from backend.api.v1 import deps
+    manager = deps.app_state.updates
+
+    class StubSource:
+        def check_available(self, manifest):
+            return {"ref": "abcdef012345", "ref_type": "commit", "version": "1.6.0",
+                    "release_tag": None, "published_at": None, "url": "x",
+                    "development": False}
+    manager.source_for = lambda m: StubSource()
+    # network-checker is installed but unmanaged -> confirmation required
+    r = api_client.post("/updates/network-checker/update",
+                        json={"project_id": "network-checker", "confirm": False})
+    assert r.status_code == 400
+    assert "requires confirmation" in r.json()["detail"]
+
+
+def test_api_rollback_invalid_backup_id(api_client):
+    r = api_client.post("/updates/rollback/A!")
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------

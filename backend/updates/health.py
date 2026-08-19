@@ -53,10 +53,14 @@ class HealthCheckManager:
             if not version_file.exists():
                 return False, f"version file missing: {project.current_version_file or 'VERSION'}"
             from .sources import parse_version_from_file
+            from .versions import compare_versions
             local = parse_version_from_file(version_file)
             expected = context.get("expected_version")
-            if expected and local and local != str(expected):
-                return False, f"version mismatch: local {local} != expected {expected}"
+            if expected and local:
+                # semantic compare: 1.6.0 == 1.6.0+123 (build metadata ignored)
+                cmp = compare_versions(local, str(expected))
+                if cmp not in (0, None):
+                    return False, f"version mismatch: local {local} != expected {expected}"
             return local is not None, f"version file readable: {local}"
         if name == "required-files":
             missing = []

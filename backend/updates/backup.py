@@ -79,6 +79,7 @@ class BackupManager:
                 "backup_id": backup_id,
                 "project": project.id,
                 "created_at": utc_now_iso(),
+                "operation": "update",
                 "tool": "jpnh-update-manager",
             }
             _write_json(backup_root / "manifest.json", manifest)

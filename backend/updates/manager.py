@@ -40,8 +40,9 @@ from .versions import compare_versions
 
 METADATA_FILE = ".jpnh-update.json"
 
-VALID_STATUS = {"up-to-date", "update-available", "untracked", "unknown",
-                "disabled", "error", "newer-than-remote"}
+VALID_STATUS = {"up-to-date", "update-available", "installed", "missing",
+                "unknown", "disabled", "error", "newer-than-remote",
+                "no-stable-release"}
 
 
 class UpdateManagerError(Exception):
@@ -109,7 +110,9 @@ class UpdateManager:
         version = None
         ref = None
         ref_type = None
-        tracked = False
+        # A staging-only project (JPNH core) is never swapped in place, so it
+        # is always considered a known, tracked install.
+        tracked = bool(project.staging_only)
 
         meta = self._read_metadata(project)
         if meta:
@@ -185,8 +188,13 @@ class UpdateManager:
                     "development": bool(stored.get("development")),
                 }
                 status, _ = self._status_from(project, current, cached_available)
+                error = stored.get("last_error")
             elif current.get("tracked"):
-                status = "untracked"  # installed but never compared upstream yet
+                status = "unknown"  # installed and managed, never checked upstream
+            elif current.get("installed"):
+                status = "installed"  # present, no baseline yet
+            else:
+                status = "missing"
 
         entry = {
             **base,
@@ -194,6 +202,7 @@ class UpdateManager:
             "local_changes": local,
             "status": status,
             "available": None,
+            "note": None,
             "last_update": stored.get("updated_at"),
             "last_check": stored.get("last_check"),
             "error": error,
@@ -253,6 +262,8 @@ class UpdateManager:
                 "available": None,
                 "status": "up-to-date" if current.get("installed") else "unknown",
                 "would_update": False,
+                "development": False,
+                "note": None,
                 "build_required": False,
                 "requires_confirmation": False,
                 "local_changes": self.local_changes(project),
@@ -284,6 +295,7 @@ class UpdateManager:
             "status": status,
             "would_update": would_update,
             "development": development,
+            "note": available.get("note"),
             "build_required": project.build_strategy not in ("none",) or bool(project.build_command),
             "requires_confirmation": requires_confirmation,
             "local_changes": local,
@@ -301,6 +313,10 @@ class UpdateManager:
         return plan
 
     def _status_from(self, project: ProjectManifest, current: dict, available: dict) -> tuple[str, bool]:
+        # A stable-only project must never present a branch-head development
+        # build as a stable update.
+        if available.get("development") and project.release_only:
+            return "no-stable-release", False
         cur_ref = current.get("ref")
         new_ref = available.get("ref")
         if cur_ref and new_ref and cur_ref == new_ref:
@@ -310,15 +326,18 @@ class UpdateManager:
         cmp = compare_versions(cur_ver, new_ver) if (cur_ver and new_ver) else None
         if cmp == 1:
             return "newer-than-remote", False
+        if not current.get("installed"):
+            return "missing", bool(new_ref)
+        if not current.get("tracked"):
+            # present but the update manager has no baseline for it yet; the
+            # first update backs it up and establishes one
+            return "installed", bool(new_ref)
         if cmp == 0:
             if cur_ref and new_ref:
                 return "up-to-date" if cur_ref == new_ref else "update-available", True
             return "update-available" if new_ref else "up-to-date", bool(new_ref)
-        if not current.get("tracked") and cur_ver is not None:
-            # untracked install: can't prove it is up-to-date
-            return "untracked", bool(new_ref)
         if cmp is None:
-            return "untracked" if not current.get("tracked") else "update-available", bool(new_ref)
+            return "unknown" if not new_ref else "update-available", bool(new_ref)
         return "update-available", True
 
     def _error_plan(self, project: ProjectManifest, error: str) -> dict[str, Any]:
@@ -329,6 +348,8 @@ class UpdateManager:
             "available": None,
             "status": "error",
             "would_update": False,
+            "development": False,
+            "note": None,
             "build_required": False,
             "requires_confirmation": False,
             "local_changes": None,
@@ -357,6 +378,14 @@ class UpdateManager:
                     "status": "up-to-date", "old_version": plan["current"].get("version"),
                     "new_version": plan["available"].get("version") if plan.get("available") else plan["current"].get("version")}
 
+        if plan["status"] == "no-stable-release":
+            note = plan.get("note") or "no stable release is published"
+            self._log_warn(f"{project.id}: {note}")
+            return {"ok": False, "project_id": project.id, "result": "no-stable-release",
+                    "status": "no-stable-release", "error": note,
+                    "old_version": plan["current"].get("version"),
+                    "new_version": None}
+
         if plan["status"] == "newer-than-remote":
             raise UpdateManagerError(f"local {project.id} is newer than the remote; nothing to update")
 
@@ -365,7 +394,7 @@ class UpdateManager:
             if local.get("detected"):
                 reason = "local changes detected"
             elif not local.get("tracked"):
-                reason = "installation is untracked"
+                reason = "installation is not tracked by the update manager"
             elif plan.get("development"):
                 reason = "this is a development build (no stable release/tag)"
             else:
@@ -409,12 +438,16 @@ class UpdateManager:
                 result = self._apply_in_place(project, staged, new_ref, new_version,
                                               old_version, backup_id, plan)
             return result
-        except UpdateSourceError as exc:
+        except (UpdateSourceError, OSError) as exc:
+            # OSError included so a filesystem failure mid-apply can never
+            # leave the component half-updated without a rollback attempt.
             self._log_err(f"update failed for {project.id}: {exc}")
             rolled = self._auto_rollback(project, backup_id, old_version, new_version, str(exc))
-            return {"ok": False, "project_id": project.id, "result": "rolled-back",
+            rolled_ok = bool(rolled.get("restored"))
+            result = "rolled-back" if rolled_ok else "rollback-failed"
+            return {"ok": False, "project_id": project.id, "result": result,
                     "error": str(exc), "backup_id": backup_id,
-                    "rollback": rolled}
+                    "rollback": rolled, "rollback_failed": not rolled_ok}
 
     # -- apply: staging-only (JPNH core) ------------------------------------------
 
@@ -591,19 +624,34 @@ class UpdateManager:
                 entry["error"] = str(exc)
                 summary.append(entry)
                 continue
-            if plan["status"] in ("error", "unknown"):
+            if plan["status"] in ("error", "unknown", "missing"):
                 entry["status"] = "skipped"
-                entry["error"] = plan["error"] or "unknown status"
+                entry["error"] = plan["error"] or {
+                    "error": "check failed", "unknown": "unknown status",
+                    "missing": "project is not installed",
+                }.get(plan["status"])
                 summary.append(entry)
                 continue
             if plan["status"] == "up-to-date":
                 entry["status"] = "current"
                 summary.append(entry)
                 continue
+            if plan["status"] == "no-stable-release":
+                entry["status"] = "no-stable-release"
+                entry["error"] = plan.get("note") or "no stable release is published"
+                summary.append(entry)
+                continue
             if plan.get("requires_confirmation"):
                 entry["status"] = "skipped"
-                entry["error"] = ("local changes detected" if (plan["local_changes"] or {}).get("detected")
-                                  else "untracked installation")
+                local = plan.get("local_changes") or {}
+                if local.get("detected"):
+                    entry["error"] = "local changes detected"
+                elif not local.get("tracked"):
+                    entry["error"] = "installation is not tracked by the update manager"
+                elif plan.get("development"):
+                    entry["error"] = "development build; not applied automatically"
+                else:
+                    entry["error"] = "confirmation required"
                 summary.append(entry)
                 continue
             try:

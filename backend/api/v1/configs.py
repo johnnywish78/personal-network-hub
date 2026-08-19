@@ -16,7 +16,7 @@ from ...configs import parser as config_parser
 from ...configs.model import ConfigStatus, NormalizedConfig
 from ...configs.normalizer import normalize
 from ...configs.validator import validate
-from ...network.config_test import test_config
+from ...network.config_test import run_config_test
 from ...services.state import AppState
 from .deps import get_state
 
@@ -131,7 +131,7 @@ def test_one(config_id: str, state: AppState = Depends(get_state)):
     if not cfg:
         raise HTTPException(404, "config not found")
     state.config_store.update_status(config_id, ConfigStatus.TESTING)
-    result = test_config(cfg)
+    result = run_config_test(cfg)
     state.config_store.update_status(config_id, ConfigStatus(result["status"]),
                                      latency_ms=result.get("latency_ms"),
                                      error=result.get("error"))
@@ -149,7 +149,7 @@ def test_many(ids: list[str], state: AppState = Depends(get_state)):
             results.append({"config_id": config_id, "error": "not found"})
             continue
         state.config_store.update_status(config_id, ConfigStatus.TESTING)
-        result = test_config(cfg)
+        result = run_config_test(cfg)
         state.config_store.update_status(config_id, ConfigStatus(result["status"]),
                                          latency_ms=result.get("latency_ms"),
                                          error=result.get("error"))

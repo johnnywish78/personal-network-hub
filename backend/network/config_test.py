@@ -14,6 +14,12 @@ open. Final status decisions:
 
 from __future__ import annotations
 
+# This module is a runtime library, not a pytest test file. pytest globs
+# ``*_test.py`` and would collect ``run_config_test`` as a test (its first
+# argument is a config object, not a fixture) and warn on the imported
+# ``TestResult`` enum. Mark it as a non-test module explicitly.
+__test__ = False
+
 import datetime
 import time
 from typing import Optional
@@ -32,7 +38,7 @@ def _needs_tls(cfg: NormalizedConfig) -> bool:
     return str(cfg.security or "").lower() in ("tls", "reality")
 
 
-def test_config(cfg: NormalizedConfig, timeout: float = 5.0) -> dict:
+def run_config_test(cfg: NormalizedConfig, timeout: float = 5.0) -> dict:
     """Run the full pipeline against one config.
 
     Returns a dict with per-stage results plus `result` and `status`.
