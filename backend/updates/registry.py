@@ -111,17 +111,25 @@ class ProjectRegistry:
         one bad file can never break the registry or the UI.
         """
         manifests: dict[str, ProjectManifest] = {}
+        builtin_ids: set[str] = set()
         for raw in BUILTIN_PROJECTS:
             try:
                 manifest = ProjectManifest.from_dict(raw)
                 manifest.validate()
                 manifests[manifest.id] = manifest
+                builtin_ids.add(manifest.id)
             except (ValueError, TypeError) as exc:
                 raise ValueError(f"invalid built-in project '{raw.get('id')}': {exc}") from exc
         for raw in self._user_manifests():
             try:
                 manifest = ProjectManifest.from_dict(raw, strict=True)
                 manifest.validate()
+                if manifest.id in builtin_ids:
+                    # a per-user file must never override a built-in project;
+                    # that would let a stray manifest redirect the vendored
+                    # Network Checker or JPNH core to an arbitrary repository
+                    self._errors.append(f"{raw.get('id')}: cannot override built-in project '{manifest.id}'")
+                    continue
                 manifests[manifest.id] = manifest
             except (ValueError, TypeError) as exc:
                 self._errors.append(f"{raw.get('id')}: {exc}")

@@ -22,10 +22,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from .manager import UpdateManager, UpdateManagerError  # noqa: E402
+try:
+    from .manager import UpdateManager, UpdateManagerError  # noqa: E402
+    from ..services.logging import redact  # noqa: E402
+except ImportError as exc:  # pragma: no cover - environment guard
+    print("error: the update CLI needs its Python dependencies "
+          "(install them with `pip install -r requirements.txt` "
+          "or activate the project virtual environment).", file=sys.stderr)
+    print(f"details: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 
 def _log(level: str, _source: str, message: str) -> None:
+    message = redact(str(message))
     if level == "ERROR":
         print(f"[ERROR] {message}", file=sys.stderr)
     elif level == "WARNING":
@@ -112,7 +121,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             _print({"backups": manager.backup.list()})
             return 0
     except UpdateManagerError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {redact(str(exc))}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\naborted", file=sys.stderr)

@@ -217,6 +217,28 @@ def test_registry_malformed_user_manifest_skipped(tmp_path):
     assert any("bad" in e for e in registry.errors())
 
 
+def test_registry_user_manifest_cannot_override_builtin(tmp_path):
+    """A per-user manifest must never replace a built-in project; otherwise a
+    stray file could redirect the vendored Network Checker or JPNH core to an
+    arbitrary repository."""
+    projects = tmp_path / "data" / "projects"
+    projects.mkdir(parents=True)
+    (projects / "network-checker.json").write_text(json.dumps({
+        "id": "network-checker", "name": "EVIL", "source_type": "github",
+        "repository": "attacker/repo", "install_path": "third_party/evil",
+        "version_detection": "version_file", "current_version_file": "VERSION",
+    }))
+    (projects / "mine.json").write_text(json.dumps({
+        "id": "mine", "name": "Mine", "source_type": "local",
+        "install_path": "third_party/mine",
+    }))
+    registry = ProjectRegistry(user_dir=projects)
+    nc = registry.get("network-checker")
+    assert nc.repository == "mirarr-app/network-checker"  # built-in wins
+    assert "mine" in registry.ids()
+    assert any("cannot override built-in" in e for e in registry.errors())
+
+
 def test_manifest_rejects_unsafe_values():
     with pytest.raises(ValueError):
         ProjectManifest.from_dict({"id": "ok", "install_path": "../escape"})
@@ -309,6 +331,57 @@ def test_backup_rejects_invalid_id():
     backup = BackupManager(root=Path(tempfile.mkdtemp()))
     with pytest.raises(ValueError):
         backup.resolve("../../escape")
+
+
+def test_backup_create_with_existing_state_files(tmp_path, isolated_data):
+    """State snapshotting must not crash when real state files exist: the
+    backup's state/ directory has to be created before copying them."""
+    root, manifest = make_project(tmp_path)
+    from backend.storage.paths import settings_path, services_path
+    settings_path().parent.mkdir(parents=True, exist_ok=True)
+    settings_path().write_text('{"theme": "dark"}')
+    services_path().write_text('{"services": []}')
+    backup = BackupManager(root=root)
+    backup_id = backup.create(manifest, version_info={"old_version": "1.0.0"})
+    info = backup.get(backup_id)
+    assert info is not None
+    state_dir = Path(info["path"]) / "state"
+    assert (state_dir / "settings.json").exists()
+    assert (state_dir / "settings.json").read_text() == '{"theme": "dark"}'
+    # secret values never appear in backup metadata
+    meta = json.loads((Path(info["path"]) / "metadata.json").read_text())
+    assert "secret" not in json.dumps(meta).lower()
+
+
+def test_backup_restore_staging_only_never_touches_checkout(tmp_path, isolated_data):
+    """Rolling back a staging-only project (JPNH core) must restore user state
+    but NEVER replace the running checkout in place."""
+    root = tmp_path / "root"
+    root.mkdir(parents=True)
+    (root / "VERSION").write_text("0.1.0")
+    (root / "backend").mkdir()
+    (root / "backend" / "main.py").write_text("print('ok')")
+    manifest = ProjectManifest.from_dict({
+        "id": "jpnh-core", "name": "JPNH Core", "source_type": "github",
+        "repository": "owner/jpnh", "install_path": ".", "staging_only": True,
+    })
+    from backend.storage.paths import settings_path
+    settings_path().parent.mkdir(parents=True, exist_ok=True)
+    settings_path().write_text('{"theme": "dark"}')
+    backup = BackupManager(root=root)
+    backup_id = backup.create(manifest, version_info={"old_version": "0.1.0"})
+    # simulate the checkout changing while the staged update sits in state
+    (root / "VERSION").write_text("CHANGED")
+    restored = backup.restore(backup_id, manifest)
+    assert restored["project_restored"] is False
+    assert (root / "VERSION").read_text() == "CHANGED"  # checkout untouched
+    # state files still restored
+    assert "settings" in restored["state_restored"]
+
+
+def test_backup_timestamps_have_microseconds(tmp_path):
+    from backend.updates.backup import _timestamp_safe
+    assert len(_timestamp_safe()) >= 22  # ...%fZ adds >6 digits
 
 
 # ---------------------------------------------------------------------------
@@ -1103,3 +1176,13 @@ def test_cli_dry_run_uses_manager(tmp_path, capsys, monkeypatch):
     assert cli_mod.main(["dry-run"]) == 0
     assert captured["called"] is True
     assert "demo" in capsys.readouterr().out
+
+
+def test_cli_logs_redact_credentials(tmp_path, capsys, monkeypatch):
+    """CLI output (stdout/stderr) must never echo credentials."""
+    from backend.updates import cli
+    cli._log("WARNING", "updates", "proxy error: http://user:sup3rs3cret@proxy:8080")
+    cli._log("ERROR", "updates", "failed https://x?token=TOPSECRETVALUE")
+    out = capsys.readouterr().out + capsys.readouterr().err
+    assert "sup3rs3cret" not in out
+    assert "TOPSECRETVALUE" not in out

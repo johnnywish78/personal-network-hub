@@ -140,7 +140,8 @@ Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
   `third_party/network-checker`, version detected from `pubspec.yaml`, rebuilt
   with `build-network-checker.mjs`). Additional projects live in
   `<data_dir>/projects/*.json`; malformed manifests are skipped and reported
-  rather than crashing.
+  rather than crashing, and a per-user file can never override a built-in
+  project.
 - **No git required.** Upstream sources are fetched as GitHub tarballs,
   fingerprint-checked, and extracted; a `.jpnh-update.json` metadata file
   records the applied ref/version and is excluded from fingerprints.
@@ -157,8 +158,10 @@ Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
   every tarball member is checked against path traversal and symlink escape
   before extraction.
 - **Safe by default.**
-  - `jpnh-core` updates are always staged: downloaded, validated, and health-checked,
-    then applied on the next launch — a running checkout is never hot-swapped.
+  - `jpnh-core` updates are always staged: downloaded, validated, health-checked,
+    and recorded in update state — the running checkout is never replaced in
+    place. **Activation is not automatic**: the staged checkout is applied
+    manually or via a new release. No self-update mechanism fabricates it.
   - Untracked or locally-modified installs require explicit confirmation and
     are skipped by `update-all`.
   - Every apply creates a backup (state files + project copy, credential *keys*
@@ -171,6 +174,12 @@ Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
   Upstream checks honour standard proxy environment variables
   (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), so you can activate a
   terminal proxy before running `update:check`.
+- **JPNH core repository accessibility.** As of this writing the GitHub API
+  reports `johnnywish78/personal-network-hub` as not publicly accessible, so a
+  live core check reports "repository not found or not publicly accessible"
+  and no update is staged. This is expected and handled honestly; it is not a
+  coding failure and no version is invented. The reachable-but-no-stable-release
+  path is covered by tests.
 
 ## Production packaging
 

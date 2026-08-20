@@ -42,7 +42,9 @@ def utc_now_iso() -> str:
 
 
 def _timestamp_safe() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # microsecond precision keeps two updates of the same project within the
+    # same second from colliding on a backup directory name
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def validate_backup_id(backup_id: str) -> str:
@@ -92,6 +94,7 @@ class BackupManager:
             _write_json(backup_root / "metadata.json", metadata)
 
             state_dir = backup_root / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
             for name, path_fn in STATE_FILES.items():
                 path = path_fn()
                 if path.exists():
@@ -165,7 +168,12 @@ class BackupManager:
         project_dir = project.install_dir(self._root)
         project_restored = False
         project_src = backup_root / "project"
-        if project_src.exists():
+        if project.staging_only:
+            # A staging-only project (JPNH core) must NEVER have its running
+            # checkout replaced in place — the same invariant that governs
+            # updates. Only user state is restored.
+            project_restored = False
+        elif project_src.exists():
             if project_dir.exists():
                 shutil.rmtree(project_dir)
             project_dir.mkdir(parents=True, exist_ok=True)
