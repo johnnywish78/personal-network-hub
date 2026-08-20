@@ -60,7 +60,7 @@ class BPBWizardAdapter(ProviderAdapter):
     name = "bpb-wizard"
     display_name = "BPB Wizard"
     repository_url = "https://github.com/bia-pain-bache/BPB-Wizard"
-    official_url = "https://bpb-wizard.bia-pain-bache.pages.dev"
+    official_url = "https://wizard.bpb-panel.workers.dev"
     source_type = "github_repository"
     integration_type = "provider_adapter"
     supports = ["open", "deploy_helper", "open_panel"]
