@@ -35,7 +35,7 @@ PRESET_SERVICES: list[dict[str, Any]] = [
      "url": None, "icon": "▤", "category": "provider", "open_mode": "embedded",
      "integration_type": "provider_adapter", "repo": "bia-pain-bache/BPB-Worker-Panel"},
     {"id": "bpb-wizard", "name": "BPB Wizard", "type": "tool",
-     "url": "https://bpb-wizard.bia-pain-bache.pages.dev", "icon": "▥", "category": "provider",
+     "url": "https://wizard.bpb-panel.workers.dev", "icon": "▥", "category": "provider",
      "open_mode": "embedded", "integration_type": "provider_adapter",
      "repo": "bia-pain-bache/BPB-Wizard"},
     {"id": "zeus", "name": "ZEUS", "type": "panel", "url": None, "icon": "▣",
