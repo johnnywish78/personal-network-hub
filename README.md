@@ -133,6 +133,14 @@ registry. All operations are also exposed over the API (`/updates`,
 Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
 `update`, `update:all`, `update:history`, `update:backups`.
 
+Apply-on-restart for JPNH core (source/dev installs):
+```bash
+# stage the new core checkout, then apply it on the next start
+.venv/bin/python -m backend.updates.apply_pending
+# or clear a previously staged apply without applying it
+.venv/bin/python -m backend.updates.apply_pending --clear
+```
+
 ### How it works
 
 - **Registry is the source of truth.** Built-ins are `jpnh-core` (this app) and
@@ -145,6 +153,15 @@ Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
 - **No git required.** Upstream sources are fetched as GitHub tarballs,
   fingerprint-checked, and extracted; a `.jpnh-update.json` metadata file
   records the applied ref/version and is excluded from fingerprints.
+- **Automatic adoption / baselining.** An install that is present but not yet
+  managed (no `.jpnh-update.json`) is *adopted* on the next scan: the existing
+  tree is fingerprinted in place as the baseline, marked `adopted`, and
+  displayed as **Managed** — with **no download and no modification of the
+  files**. Dry-run/check operations never write adoption metadata; adoption is
+  written only by a real scan/update. Once adopted, later local modifications
+  are still detected against the baseline. Projects whose version cannot be
+  determined, that live at the repo root, or that are not from a GitHub/git
+  source are never adopted.
 - **Status model.** A component is `up-to-date`, `update-available`,
   `installed` (present but not yet managed — the first update backs it up and
   tracks it), `missing` (not installed), `no-stable-release` (reachable, but
@@ -160,16 +177,29 @@ Or from `desktop/` via npm: `npm run update:check`, `update:dry-run`,
 - **Safe by default.**
   - `jpnh-core` updates are always staged: downloaded, validated, health-checked,
     and recorded in update state — the running checkout is never replaced in
-    place. **Activation is not automatic**: the staged checkout is applied
-    manually or via a new release. No self-update mechanism fabricates it.
+    place. **Activation is not automatic while a backend is running.** A source
+    checkout can be activated on the *next application start* via the
+    **Download & Stage → Restart & Update** flow: the backend writes a
+    `.jpnh-pending-apply.json` marker, the app relaunches, and the updater swaps
+    the staged checkout in (backing up the current tree to the rollback dir,
+    health-checking, and rolling back if the swap fails). A packaged
+    (AppImage/deb) install does not self-swap — it points you at the new
+    release instead. AppImage installs can additionally be updated *in place* by
+    an external updater that atomically replaces the running AppImage and keeps
+    the previous one as `<name>.old` until the new build starts successfully.
   - Untracked or locally-modified installs require explicit confirmation and
     are skipped by `update-all`.
   - Every apply creates a backup (state files + project copy, credential *keys*
     only — never secret values) under `<data_dir>/backups/<project>-<timestamp>/`.
+    Backup manifests record the project, source, reason, backup id, timestamp,
+    and old/new version and ref.
   - Apply, build, or health-check failures trigger an automatic rollback to the
-    latest backup. Manual rollback is available via CLI/API/GUI.
+    latest backup; rolling back a built component (e.g. Network Checker) rebuilds
+    it afterwards and re-checks its health. Manual rollback is available via
+    CLI/API/GUI.
 - **Health checks** include required-files presence and a live backend API ping;
   for `network-checker` the bundle is also verified as a runnable Flutter asset.
+  History entries record the build and health result of every operation.
 - **VPN / proxy note.** JPNH has no built-in VPN and does not require one.
   Upstream checks honour standard proxy environment variables
   (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), so you can activate a
@@ -238,10 +268,15 @@ with last-test time, latency, failure reason, provider, and protocol shown inlin
 
 Covers parsers (VLESS/Trojan/VMess/SS/JSON), normalization, validation, storage,
 export, network diagnostics, provider adapters, Xray/client detection, Network
-Checker bundle resolution, the `/checker/*` native tool API, and API contracts.
+Checker bundle resolution, the `/checker/*` native tool API, API contracts, and
+the update manager — including automatic adoption/baselining, backup/rollback
+(rebuild after rollback), health checks, history fields, self-update
+apply-on-restart (source + AppImage + deb), and the `/updates/runtime`,
+`/updates/{id}/restart-apply`, and `/updates/pending-apply/clear` endpoints.
 
 ```bash
-# Node tests for the pure-Node process managers
+# Node tests for the pure-Node process managers, the self-updater, and the
+# Updates view contract (event-driven, no periodic refresh)
 cd desktop && node --test test/*.test.js
 ```
 

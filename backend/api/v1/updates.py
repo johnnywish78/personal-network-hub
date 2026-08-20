@@ -13,6 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ...updates.manager import UpdateManagerError
+from ...updates.self_update import (_validate_staged, clear_pending_apply,
+                                    pending_apply_info, request_apply, runtime_mode)
 from ...services.state import AppState
 from .deps import get_state
 
@@ -55,7 +57,10 @@ def get_project(project_id: str, state: AppState = Depends(get_state)):
 @updates_router.get("")
 def updates_overview(state: AppState = Depends(get_state)):
     """Combined status without hitting the network (uses cached state)."""
-    return state.updates.status_all(check=False)
+    data = state.updates.status_all(check=False)
+    data["runtime"] = runtime_mode()
+    data["pending_apply"] = pending_apply_info()
+    return data
 
 
 @updates_router.post("/check")
@@ -116,6 +121,66 @@ def update_history(state: AppState = Depends(get_state)):
 @updates_router.get("/backups")
 def list_backups(project: Optional[str] = None, state: AppState = Depends(get_state)):
     return {"backups": state.updates.backup.list(project=project)}
+
+
+@updates_router.get("/runtime")
+def runtime(state: AppState = Depends(get_state)):
+    """How JPNH is running (source/appimage/deb) + pending self-update info."""
+    return {
+        "mode": runtime_mode(),
+        "appimage": __import__("backend.updates.self_update", fromlist=["appimage_target"]).appimage_target(),
+        "pending_apply": pending_apply_info(),
+    }
+
+
+@updates_router.post("/{project_id}/restart-apply")
+def restart_apply(project_id: str, state: AppState = Depends(get_state)):
+    """Request that a staged JPNH Core update be applied on the next launch.
+
+    Only valid for staging-only projects and only in development/source mode:
+    packaged AppImage/DEB installs cannot be replaced from a staged source tree
+    (their resources are read-only) and are updated by installing a new JPNH
+    release instead.
+    """
+    manager = state.updates
+    project = manager.registry.get(project_id)
+    if not project or not project.staging_only:
+        raise HTTPException(400, "self-update is only available for staging-only projects")
+    stored = manager.state.get(project_id)
+    staged_path = stored.get("staged_path")
+    if not staged_path:
+        raise HTTPException(400, "no staged update to apply — run an update first")
+    from pathlib import Path
+    from ...storage.paths import update_cache_dir
+    from ...updates.manager import UpdateSourceError
+
+    staged = Path(staged_path).resolve()
+    if not staged.is_dir():
+        raise HTTPException(400, "staged update directory no longer exists")
+    # a self-update may only apply trees the manager itself staged
+    try:
+        staged.relative_to(update_cache_dir().resolve())
+    except ValueError:
+        raise HTTPException(400, "staged update is outside the update cache") from None
+    error = _validate_staged(project.required_files, project.current_version_file,
+                             stored.get("staged_version"), staged)
+    if error:
+        raise HTTPException(400, error)
+
+    mode = runtime_mode()
+    if mode != "source":
+        raise HTTPException(400, (
+            "JPNH is running from a packaged build; JPNH Core is updated by "
+            "installing a new JPNH release, not by replacing the source tree."))
+    payload = request_apply(project_id, str(staged), stored.get("staged_version"), mode=mode)
+    return {"ok": True, "pending": payload,
+            "note": "JPNH will apply the staged update on the next launch."}
+
+
+@updates_router.post("/pending-apply/clear")
+def clear_pending(state: AppState = Depends(get_state)):
+    clear_pending_apply()
+    return {"ok": True}
 
 
 @updates_router.post("/rollback/{backup_id}")

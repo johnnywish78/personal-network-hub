@@ -13,4 +13,7 @@ contextBridge.exposeInMainWorld("jpnh", {
     stop: () => ipcRenderer.invoke("network-checker-stop"),
     status: () => ipcRenderer.invoke("network-checker-status"),
   },
+  // Quit the app (used after requesting a Restart & Update so the next launch
+  // applies the staged JPNH Core update).
+  quit: () => ipcRenderer.invoke("app-quit"),
 });

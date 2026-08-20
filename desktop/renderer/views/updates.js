@@ -2,13 +2,22 @@
 
 // Updates Hub: Update Manager for JPNH core, vendored projects/components,
 // and any registry-defined future projects. Backed by /updates + /projects.
+//
+// Design notes (requirements):
+//   * Event-driven only — this view never installs an interval or a "seconds
+//     counter"; it re-renders on user actions and when operations finish.
+//   * Progress is textual + an indeterminate spinner. No fake percentages.
+//   * Cached status renders immediately; a background check runs after first
+//     paint and refreshes the cards when it returns.
+//   * JPNH Core is staging-only: "Download & Stage" then "Restart & Update"
+//     (source/dev mode). Packaged builds update JPNH Core with the JPNH release.
 
 window.Views = window.Views || {};
 
 const UPDATE_STATUS_LABEL = {
   "up-to-date": "✓ Up to date",
   "update-available": "Update available",
-  installed: "Installed (not yet managed)",
+  installed: "Installed",
   missing: "Not installed",
   disabled: "Disabled",
   error: "⚠ Update failed",
@@ -22,7 +31,7 @@ function statusBadge(status) {
   const cls = {
     "up-to-date": "ok",
     "update-available": "warn",
-    installed: "warn",
+    installed: "ok",
     missing: "muted",
     disabled: "muted",
     error: "bad",
@@ -45,8 +54,28 @@ function shortRef(ref) {
   return String(ref).length > 12 ? String(ref).slice(0, 12) + "…" : String(ref);
 }
 
-function projectCard(project, { onChanged, busy }) {
-  const { el, badge, toast, confirmDialog, openExternal } = window.ui;
+const viewState = {
+  busyProject: null,
+  operation: "",
+  runtime: "source",
+  pendingApply: null,
+};
+
+function setOperation(projectId, text) {
+  viewState.busyProject = projectId || null;
+  viewState.operation = text || "";
+}
+
+const cache = (function () {
+  let value = null;
+  return {
+    get: () => value,
+    set: (data) => { value = data; },
+  };
+})();
+
+function projectCard(project, onChanged) {
+  const { el, toast } = window.ui;
   const card = el("div", "provider-card");
   const head = el("div", "head");
   head.appendChild(el("span", "service-icon", project.icon || "⇅"));
@@ -56,7 +85,10 @@ function projectCard(project, { onChanged, busy }) {
     ? `github.com/${project.repository}` : "no external source";
   titleWrap.appendChild(el("div", "meta mono", repo));
   head.appendChild(titleWrap);
-  head.appendChild(statusBadge(project.status));
+
+  const managed = project.status === "unknown" && project.adopted &&
+    project.current && project.current.installed;
+  head.appendChild(managed ? window.ui.badge("Managed", "ok") : statusBadge(project.status));
   card.appendChild(head);
 
   const meta = el("div", "meta muted mono");
@@ -85,6 +117,21 @@ function projectCard(project, { onChanged, busy }) {
     card.appendChild(avail);
   }
 
+  if (project.health || project.build || project.backup_available !== undefined) {
+    const summary = el("div", "meta mono mt");
+    const bits = [];
+    if (project.health) bits.push(project.health.ok ? "health: ✓" : "health: ✗");
+    if (project.build && project.build.required) bits.push("build required");
+    if (project.backup_available > 0) bits.push("backups: " + project.backup_available);
+    if (bits.length) summary.textContent = bits.join("  ·  ");
+    card.appendChild(summary);
+  }
+
+  if (project.adopted) {
+    card.appendChild(el("div", "meta ok mt",
+      "Adopted automatically from the existing installation — nothing was downloaded. Local changes are still detected."));
+  }
+
   if (project.local_changes && project.local_changes.detected) {
     const warn = el("div", "meta warn mt");
     warn.textContent = "⚠ Local changes detected — updating may overwrite them" +
@@ -105,33 +152,99 @@ function projectCard(project, { onChanged, busy }) {
     card.appendChild(el("div", "meta bad mt", "⚠ " + project.error));
   }
 
-  const actions = el("div", "actions");
+  card.appendChild(actionRow(project, onChanged));
+  return card;
+}
+
+function actionRow(project, onChanged) {
+  const actions = window.ui.el("div", "actions");
+  if (project.id === "jpnh-core") return coreActions(project, onChanged, actions);
+
+  const busy = viewState.busyProject === project.id;
   const canUpdate = project.enabled &&
     project.source_type !== "none" &&
     ["update-available", "installed", "unknown", "newer-than-remote", "error"].includes(project.status);
 
   if (canUpdate && !busy) {
-    const btn = el("button", "btn small primary", "Update");
+    const btn = window.ui.el("button", "btn small primary", "Update");
     btn.addEventListener("click", () => updateProject(project, onChanged));
     actions.appendChild(btn);
+  } else if (busy) {
+    actions.appendChild(window.ui.el("span", "spinner", ""));
   }
-  if (project.status === "staged" && project.staged_ref) {
+  if (project.repository) {
+    const link = window.ui.el("button", "btn small ghost", "Repo");
+    link.addEventListener("click", () => window.ui.openExternal("https://github.com/" + project.repository));
+    actions.appendChild(link);
+  }
+  return actions;
+}
+
+function coreActions(project, onChanged, actions) {
+  const { el, toast, confirmDialog, openExternal } = window.ui;
+  const busy = viewState.busyProject === project.id;
+  const stagedReady = !!project.staged_ref && viewState.pendingApply === null;
+  const packaged = viewState.runtime !== "source";
+
+  if (packaged) {
+    actions.appendChild(el("span", "meta muted mono",
+      "JPNH Core ships inside this " + (viewState.runtime === "appimage" ? "AppImage" : "package") +
+      ". Install the new JPNH release to update it."));
+    if (project.repository) {
+      const rel = el("button", "btn small ghost", "Releases");
+      rel.addEventListener("click", () => openExternal("https://github.com/" + project.repository + "/releases"));
+      actions.appendChild(rel);
+    }
+    return actions;
+  }
+
+  if (stagedReady) {
+    const btn = el("button", "btn small primary", "Restart & Update");
+    btn.addEventListener("click", () => restartAndUpdate(project, onChanged));
+    actions.appendChild(btn);
+    if (project.status === "update-available") {
+      const restage = el("button", "btn small ghost", "Re-stage");
+      restage.addEventListener("click", () => updateProject(project, onChanged, true));
+      actions.appendChild(restage);
+    }
     actions.appendChild(el("span", "meta muted mono", "staged: " + shortRef(project.staged_ref)));
+  } else if (project.status === "update-available" && !busy) {
+    const btn = el("button", "btn small primary", "Download & Stage");
+    btn.addEventListener("click", () => updateProject(project, onChanged, true));
+    actions.appendChild(btn);
+  } else if (busy) {
+    actions.appendChild(el("span", "spinner", ""));
   }
   if (project.repository) {
     const link = el("button", "btn small ghost", "Repo");
     link.addEventListener("click", () => openExternal("https://github.com/" + project.repository));
     actions.appendChild(link);
   }
-  card.appendChild(actions);
-  return card;
+  return actions;
+}
+
+function restartAndUpdate(project, onChanged) {
+  const { toast, confirmDialog } = window.ui;
+  confirmDialog(
+    "Restart & Update",
+    `JPNH will quit now. On the next launch it applies the staged ${project.name} update (${project.staged_ref}) to the source tree, health-checks it, and rolls back automatically on any failure.\n\nContinue?`,
+    async () => {
+      try {
+        const r = await window.api.post(`/updates/${project.id}/restart-apply`);
+        if (!r.ok) { toast(r.error || "could not schedule restart", "bad"); return; }
+        toast("Restarting to apply the staged update…", "info");
+        setTimeout(() => { if (window.jpnh && window.jpnh.quit) window.jpnh.quit(); }, 400);
+      } catch (err) {
+        toast(err.message, "bad");
+      }
+    });
 }
 
 function updateProject(project, onChanged) {
   const { toast, confirmDialog } = window.ui;
   const localChanged = project.local_changes && project.local_changes.detected;
   const unmanaged = project.status === "installed" || project.status === "unknown";
-  const needsConfirm = localChanged || unmanaged;
+  const needsConfirm = localChanged || (unmanaged && !project.adopted);
   const confirmMessage = needsConfirm
     ? `"${project.name}" is not yet managed by the update manager or has local changes. ` +
       "Updating backs it up first, then may overwrite existing files.\n\n" +
@@ -139,19 +252,22 @@ function updateProject(project, onChanged) {
     : `Update "${project.name}" to the available version?`;
 
   const doUpdate = async (confirm) => {
+    setOperation(project.id, `Updating ${project.name}… (backup → download → apply → build → health)`);
+    onChanged();
     try {
       const r = await window.api.post(`/updates/${project.id}/update`, {
         project_id: project.id, confirm: !!confirm,
       });
       if (r.ok || r.result === "success" || r.result === "staged") {
-        toast(`${project.name}: ${r.result === "staged" ? "staged for next launch" : "updated"}`, "ok");
+        toast(`${project.name}: ${r.result === "staged" ? "staged — Restart & Update" : "updated"}`, "ok");
       } else {
         toast(`${project.name}: ${r.error || r.result}`, "bad");
       }
-      onChanged();
     } catch (err) {
       toast(err.message, "bad");
     }
+    setOperation(null, "");
+    onChanged();
   };
 
   if (needsConfirm) {
@@ -163,23 +279,27 @@ function updateProject(project, onChanged) {
 
 function updateAll(onChanged) {
   const { toast } = window.ui;
-  toast("Updating all projects…", "info");
+  setOperation(null, "Updating all safe projects…");
+  onChanged();
   window.api.post("/updates/all", { confirm: false }).then((data) => {
     const rows = (data.summary || []).map((s) => [s.name, s.status, s.old_version || "—", s.new_version || "—", s.error || ""]);
     showSummary(rows);
-    onChanged();
-  }).catch((err) => toast(err.message, "bad"));
+  }).catch((err) => toast(err.message, "bad"))
+    .finally(() => {
+      setOperation(null, "");
+      onChanged();
+    });
 }
 
 function showSummary(rows) {
-  const { el, openModal, table } = window.ui;
+  const { openModal, table } = window.ui;
   const modal = openModal("Update Summary", table(
     ["Project", "Result", "From", "To", "Detail"], rows));
-  setTimeout(() => window.ui.closeModal(modal), 6000);
+  setTimeout(() => window.ui.closeModal(modal), 8000);
 }
 
 function showHistory() {
-  const { el, openModal, table, toast } = window.ui;
+  const { openModal, table, toast } = window.ui;
   window.api.get("/updates/history").then((data) => {
     const rows = (data.history || []).map((h) => [
       String(h.timestamp).slice(0, 16).replace("T", " "),
@@ -195,7 +315,7 @@ function showHistory() {
 }
 
 function showBackups() {
-  const { el, openModal, table, toast, confirmDialog } = window.ui;
+  const { openModal, table, toast, confirmDialog } = window.ui;
   window.api.get("/updates/backups").then((data) => {
     const backups = data.backups || [];
     const rows = backups.map((b) => [
@@ -221,97 +341,120 @@ function showBackups() {
 
 window.Views.updates = {
   async render(container, params) {
-    const { el, card, toast } = window.ui;
-    let busy = false;
+    const { el, toast } = window.ui;
 
-    const renderAll = async () => {
-      container.replaceChildren();
-      if (busy) { container.appendChild(el("div", "empty", el("span", "spinner", ""))); return; }
+    const header = el("div", "row between");
+    const heading = el("div");
+    heading.appendChild(el("h2", null, "Updates"));
+    heading.appendChild(el("p", "muted",
+      "Check and apply updates for JPNH core and managed components. " +
+      "Every update is backed up, built, and health-checked; failures roll back automatically."));
+    header.appendChild(heading);
 
-      const header = el("div", "row between");
-      const heading = el("div");
-      heading.appendChild(el("h2", null, "Updates"));
-      heading.appendChild(el("p", "muted",
-        "Check and apply updates for JPNH core and managed components. " +
-        "Every update is backed up and health-checked; failures roll back automatically."));
-      header.appendChild(heading);
+    const actions = el("div", "row");
 
-      const actions = el("div", "row");
-      const btnCheck = el("button", "btn", "⟳ Check for Updates");
-      btnCheck.addEventListener("click", async () => {
-        busy = true; renderAll();
-        try { await window.api.post("/updates/check", {}); }
-        catch (err) { toast(err.message, "bad"); }
-        busy = false; renderAll();
-      });
-      actions.appendChild(btnCheck);
-
-      const btnAll = el("button", "btn primary", "Update All");
-      btnAll.addEventListener("click", () => {
-        window.ui.confirmDialog(
-          "Update All",
-          "Update every managed project that is safe to update.\n\n" +
-          "Projects with local changes, unmanaged installs, development-only builds, " +
-          "or no stable release are skipped and reported — never silently overwritten.",
-          async () => {
-            busy = true; renderAll();
-            try { await updateAll(renderAll); }
-            catch (err) { toast(err.message, "bad"); }
-            busy = false; renderAll();
-          });
-      });
-      actions.appendChild(btnAll);
-
-      const btnHist = el("button", "btn ghost", "History");
-      btnHist.addEventListener("click", showHistory);
-      actions.appendChild(btnHist);
-
-      const btnBak = el("button", "btn ghost", "Backups");
-      btnBak.addEventListener("click", showBackups);
-      actions.appendChild(btnBak);
-
-      header.appendChild(actions);
-      container.appendChild(header);
-
-      let data;
-      let projects;
+    const btnCheck = el("button", "btn", "⟳ Check for Updates");
+    btnCheck.addEventListener("click", async () => {
+      btnCheck.disabled = true;
+      setOperation(null, "Checking for updates…");
+      refresh();
       try {
-        data = await window.api.get("/updates");
-        projects = data.projects || [];
+        await window.api.post("/updates/check", {});
+        toast("Update check complete", "ok");
       } catch (err) {
-        container.appendChild(el("div", "card", el("div", "empty", `Failed to load update status: ${err.message}`)));
+        toast(err.message, "bad");
+      }
+      setOperation(null, "");
+      btnCheck.disabled = false;
+      await refresh();
+    });
+    actions.appendChild(btnCheck);
+
+    const btnAll = el("button", "btn primary", "Update All");
+    btnAll.addEventListener("click", () => {
+      window.ui.confirmDialog(
+        "Update All",
+        "Update every managed project that is safe to update.\n\n" +
+        "Projects with local changes, un-baselinable installs, development-only builds, " +
+        "or no stable release are skipped and reported — never silently overwritten.",
+        () => updateAll(refresh));
+    });
+    actions.appendChild(btnAll);
+
+    const btnHist = el("button", "btn ghost", "History");
+    btnHist.addEventListener("click", showHistory);
+    actions.appendChild(btnHist);
+
+    const btnBak = el("button", "btn ghost", "Backups");
+    btnBak.addEventListener("click", showBackups);
+    actions.appendChild(btnBak);
+
+    header.appendChild(actions);
+    container.appendChild(header);
+
+    const cards = el("div", "updates-cards");
+    cards.id = "updates-cards";
+    container.appendChild(cards);
+
+    const drawCards = () => {
+      cards.replaceChildren();
+      if (viewState.operation) {
+        const line = el("div", "card progress-card");
+        line.appendChild(el("span", "spinner", ""));
+        line.appendChild(el("span", "progress-text", viewState.operation));
+        cards.appendChild(line);
         return;
       }
-
-      (data.errors || []).forEach((e) => container.appendChild(el("div", "meta bad mt", "⚠ " + e)));
-
+      const data = cache.get();
+      const projects = (data && data.projects) || [];
+      (data && data.errors || []).forEach((e) => cards.appendChild(el("div", "meta bad mt", "⚠ " + e)));
       const groups = { core: [], component: [], tools: [], custom: [] };
       projects.forEach((p) => {
         const key = ["core", "component", "tools"].includes(p.category) ? p.category : "custom";
         groups[key].push(p);
       });
-
       const section = (title, list) => {
         if (!list.length) return;
         const wrap = el("div");
         wrap.appendChild(el("h3", "section-title", title));
         const grid = el("div", "service-grid");
-        list.forEach((p) => grid.appendChild(projectCard(p, { onChanged: renderAll, busy })));
+        list.forEach((p) => grid.appendChild(projectCard(p, refresh)));
         wrap.appendChild(grid);
-        container.appendChild(wrap);
+        cards.appendChild(wrap);
       };
-
       section("JPNH Core", groups.core);
       section("Components", groups.component);
       section("Tools", groups.tools);
       section("Other Projects", groups.custom);
       if (!projects.length) {
-        container.appendChild(el("div", "card", el("div", "empty", "No managed projects.")));
+        cards.appendChild(el("div", "card", el("div", "empty", "No managed projects.")));
       }
-      container.appendChild(el("p", "muted",
-        "Tip: if GitHub is unreachable, activate your terminal proxy (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) and run the check again. JPNH never ships or requires a built-in VPN."));
     };
 
-    await renderAll();
+    const refresh = async () => {
+      try {
+        const data = await window.api.get("/updates");
+        cache.set(data);
+        viewState.runtime = data.runtime || "source";
+        viewState.pendingApply = data.pending_apply || null;
+      } catch (err) {
+        toast("Could not load update status: " + err.message, "bad");
+      }
+      drawCards();
+    };
+
+    // 1. cached status renders immediately (fast local overview)
+    await refresh();
+
+    // 2. background check after first paint; updates the cards when it returns
+    window.api.post("/updates/check", {}).then(async () => {
+      await refresh();
+    }).catch(() => {
+      // keep showing cached state; the user can retry with the Check button
+      drawCards();
+    });
+
+    container.appendChild(el("p", "muted",
+      "Tip: if GitHub is unreachable, activate your terminal proxy (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) and run the check again. JPNH never ships or requires a built-in VPN."));
   },
 };

@@ -396,10 +396,14 @@ def test_dry_run_never_modifies(tmp_path):
 
     plan = manager.check("demo")
     assert plan["would_update"] is True
-    assert plan["requires_confirmation"] is True   # untracked install
+    # the existing install is baselined virtually during a check, so no
+    # confirmation is required once the update itself adopts it
+    assert plan["requires_confirmation"] is False
+    assert plan["status"] == "update-available"
     assert plan["available"]["version"] == "2.0.0"
     after = sorted(p.name for p in (root / "components" / "demo").iterdir())
     assert before == after
+    assert not (root / "components" / "demo" / ".jpnh-update.json").exists()
     assert not list((tmp_path / "data" / "backups").iterdir()) if (tmp_path / "data" / "backups").exists() else True
 
 
@@ -458,12 +462,22 @@ def test_missing_status(tmp_path):
 
 
 def test_installed_status_for_unmanaged_install(tmp_path):
+    """An existing, versioned install is automatically adopted on scan/check,
+    so it reports an actionable update status instead of 'installed'."""
     root, manifest = make_project(tmp_path)
     manager = make_manager(tmp_path, manifest, source=FakeSource())
     plan = manager.check("demo")
-    assert plan["status"] == "installed"
+    # the install is baselined virtually: tracked and an update is available
+    assert plan["status"] == "update-available"
     assert plan["would_update"] is True
-    assert plan["requires_confirmation"] is True
+    assert plan["requires_confirmation"] is False
+    assert plan["current"]["tracked"] is True
+    # a check never writes the baseline (that happens on a real update)
+    assert not (root / "components" / "demo" / ".jpnh-update.json").exists()
+    # the baseline is established when the update is actually applied
+    result = manager.update("demo", confirm=False)
+    assert result["ok"] is True
+    assert (root / "components" / "demo" / ".jpnh-update.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -492,11 +506,16 @@ def test_successful_update(tmp_path):
 
 
 def test_update_refuses_untracked_without_confirmation(tmp_path):
-    root, manifest = make_project(tmp_path)
+    # An install that cannot be baselined (no detectable version) must still
+    # require explicit confirmation before it is overwritten.
+    root, manifest = make_project(tmp_path, extra={"current_version_file": None})
     manager = make_manager(tmp_path, manifest, source=FakeSource())
     with pytest.raises(UpdateManagerError) as exc:
         manager.update("demo", confirm=False)
     assert "requires confirmation" in str(exc.value)
+    # the un-baselinable install is left completely untouched
+    assert (root / "components" / "demo" / "VERSION").read_text() == "1.0.0"
+    assert not (root / "components" / "demo" / ".jpnh-update.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -588,14 +607,14 @@ def test_update_all_summary(tmp_path):
     registry = ProjectRegistry()
     registry.register(manifest)
 
-    # unsafe project (installed but unmanaged) -> skipped
+    # unsafe project (installed but cannot be baselined) -> skipped
     unsafe_dir = root / "components" / "unsafe"
     unsafe_dir.mkdir(parents=True)
     (unsafe_dir / "VERSION").write_text("1.0.0")
     unsafe_manifest = ProjectManifest.from_dict({
         "id": "unsafe", "name": "Unsafe", "source_type": "github",
         "repository": "owner/unsafe", "install_path": "components/unsafe",
-        "version_detection": "version_file", "current_version_file": "VERSION",
+        "version_detection": "version_file", "current_version_file": None,
         "required_files": ["VERSION"], "health_checks": ["required-files"],
     })
     registry.register(unsafe_manifest)
@@ -1123,9 +1142,16 @@ def test_api_update_unsafe_requires_confirmation(api_client, monkeypatch):
                     "release_tag": None, "published_at": None, "url": "x",
                     "development": False}
     manager.source_for = lambda m: StubSource()
-    # network-checker is installed but unmanaged -> confirmation required
-    r = api_client.post("/updates/network-checker/update",
-                        json={"project_id": "network-checker", "confirm": False})
+    # A genuinely un-baselinable install (missing version detection) can never
+    # be auto-adopted, so updating it without confirmation must be refused.
+    manager.registry.register(ProjectManifest.from_dict({
+        "id": "unbaselinable", "name": "Unbaselinable", "source_type": "github",
+        "repository": "owner/x", "install_path": "components/unbaselinable",
+        "version_detection": "version_file", "current_version_file": "VERSION",
+        "required_files": ["VERSION"], "health_checks": ["required-files"],
+    }))
+    r = api_client.post("/updates/unbaselinable/update",
+                        json={"project_id": "unbaselinable", "confirm": False})
     assert r.status_code == 400
     assert "requires confirmation" in r.json()["detail"]
 

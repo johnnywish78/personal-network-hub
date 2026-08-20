@@ -31,6 +31,9 @@ dist-electron/
 # --- Local data ---
 *.log
 .DS_Store
+# Per-machine Update Manager metadata (written into component trees)
+.jpnh-update.json
+.jpnh-pending-apply.json
 
 # --- Build artifacts ---
 resources/backend/

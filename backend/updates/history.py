@@ -39,6 +39,8 @@ class UpdateHistory:
             "error": entry.get("error"),
             "backup_id": entry.get("backup_id"),
             "rollback_status": entry.get("rollback_status"),
+            "build_result": entry.get("build_result"),
+            "health_result": entry.get("health_result"),
         }
         entries = self._store.read()
         if not isinstance(entries, list):

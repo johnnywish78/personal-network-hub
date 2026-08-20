@@ -69,7 +69,8 @@ class BackupManager:
         self._root = root or _project_root()
 
     def create(self, project: ProjectManifest, *, version_info: Optional[dict] = None,
-               credential_keys: Optional[list[str]] = None) -> str:
+               credential_keys: Optional[list[str]] = None,
+               reason: str = "update") -> str:
         """Create a backup for a project; returns the backup id."""
         project_dir = project.install_dir(self._root)
         backup_id = f"{project.id}-{_timestamp_safe()}"
@@ -80,6 +81,8 @@ class BackupManager:
             manifest = {
                 "backup_id": backup_id,
                 "project": project.id,
+                "source": project.source_type,
+                "reason": reason,
                 "created_at": utc_now_iso(),
                 "operation": "update",
                 "tool": "jpnh-update-manager",

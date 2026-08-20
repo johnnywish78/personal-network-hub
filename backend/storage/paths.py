@@ -84,3 +84,11 @@ def update_state_path() -> Path:
 
 def update_history_path() -> Path:
     return ensure_data_dir() / "update_history.json"
+
+
+def pending_apply_path() -> Path:
+    """Marker requesting that a staged JPNH Core update be applied on next
+    launch. Written by the Update Manager when the user chooses 'Restart &
+    Update', consumed by the external updater at startup.
+    """
+    return ensure_data_dir() / "pending-apply.json"

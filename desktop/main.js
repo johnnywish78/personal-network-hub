@@ -6,6 +6,7 @@ const fs = require("fs");
 
 const bm = require("./lib/backend-manager");
 const ncm = require("./lib/network-checker-manager");
+const updater = require("./lib/self-updater");
 
 // On Linux, Electron derives the window WM_CLASS from app.name. The packaged
 // .desktop entry sets StartupWMClass=jpnh, so pin the name to match — otherwise
@@ -222,9 +223,33 @@ ipcMain.handle("network-checker-status", () => ({
   installed: !!networkCheckerCommand(),
 }));
 
+ipcMain.handle("app-quit", () => {
+  quitCleanly();
+  return { ok: true };
+});
+
 // ---- app lifecycle --------------------------------------------------------
 
 app.whenReady().then(async () => {
+  // Apply a pending self-update (Restart & Update) before anything starts.
+  const selfUpdate = updater.runStartupSelfUpdate({
+    isPackaged: app.isPackaged,
+    rootDir: path.join(__dirname, ".."),
+  });
+  if (selfUpdate.ran) {
+    if (selfUpdate.applied) {
+      log("self-update applied:", selfUpdate.detail || selfUpdate.mode);
+    } else {
+      log("self-update pending but not applied:", selfUpdate.error || "unknown");
+    }
+    if (selfUpdate.applied && selfUpdate.relaunch) {
+      log("relaunching into the updated AppImage");
+      app.relaunch();
+      app.exit(0);
+      return;
+    }
+  }
+
   await startBackend();
   if (app.isQuitting) return;
   createWindow();

@@ -89,7 +89,7 @@ class UpdateManager:
             except (OSError, json.JSONDecodeError):
                 return None
         stored = self.state.get(project.id)
-        if stored.get("installed_ref"):
+        if stored.get("installed_ref") or stored.get("adopted") or stored.get("installed_fingerprint"):
             return stored
         return None
 
@@ -104,7 +104,8 @@ class UpdateManager:
 
     # -- current state -----------------------------------------------------------
 
-    def current_version(self, project: ProjectManifest) -> dict[str, Any]:
+    def current_version(self, project: ProjectManifest,
+                        meta: Optional[dict] = None) -> dict[str, Any]:
         """Detect the locally installed version/reference for a project."""
         install_dir = project.install_dir(self.root)
         version = None
@@ -114,7 +115,8 @@ class UpdateManager:
         # is always considered a known, tracked install.
         tracked = bool(project.staging_only)
 
-        meta = self._read_metadata(project)
+        if meta is None:
+            meta = self._read_metadata(project)
         if meta:
             ref = meta.get("ref")
             ref_type = meta.get("ref_type")
@@ -138,12 +140,14 @@ class UpdateManager:
             "install_path": str(install_dir),
         }
 
-    def local_changes(self, project: ProjectManifest) -> dict[str, Any]:
+    def local_changes(self, project: ProjectManifest,
+                      meta: Optional[dict] = None) -> dict[str, Any]:
         """Detect local modifications versus the last installed state."""
         if project.staging_only or not project.install_path or project.install_path == ".":
             return {"detected": False, "tracked": True, "files": []}
         install_dir = project.install_dir(self.root)
-        meta = self._read_metadata(project)
+        if meta is None:
+            meta = self._read_metadata(project)
         recorded_fp = (meta or {}).get("installed_fingerprint")
         if not recorded_fp:
             return {"detected": None, "tracked": False, "files": [],
@@ -160,10 +164,69 @@ class UpdateManager:
         files = sorted(set(changed + added + removed))[:50]
         return {"detected": True, "tracked": True, "files": files}
 
+    # -- adoption / baselining -----------------------------------------------------
+
+    def _virtual_adoption(self, project: ProjectManifest) -> Optional[dict]:
+        """Compute the baseline metadata a real adoption would record, without
+        writing anything. Returns None when the component cannot be baselined.
+        """
+        if project.staging_only:
+            return None
+        if not project.enabled:
+            return None
+        if project.source_type not in ("github", "git"):
+            return None
+        if not project.install_path or project.install_path == ".":
+            return None
+        if self._read_metadata(project):
+            return None  # already tracked
+        install_dir = project.install_dir(self.root)
+        if not install_dir.exists():
+            return None
+        for rel in project.required_files or []:
+            if not (install_dir / rel).exists():
+                return None
+        version = None
+        if project.current_version_file:
+            version = parse_version_from_file(install_dir / project.current_version_file)
+        if version is None:
+            return None  # no baseline derivable -> leave untouched
+        return {
+            "source_type": project.source_type,
+            "repository": project.repository,
+            "ref": None,
+            "ref_type": None,
+            "version": version,
+            "installed_version": version,
+            "installed_fingerprint": tree_fingerprint(install_dir, project),
+            "installed_hashes": file_hashes(install_dir, project),
+            "adopted": True,
+        }
+
+    def _adopt_if_unmanaged(self, project: ProjectManifest) -> bool:
+        """Baseline an existing, unmanaged installation without downloading.
+
+        When a vendored component is already present (Network Checker), has its
+        required files, and exposes a detectable version, the Update Manager
+        adopts it as a tracked install: fingerprints + hashes are recorded from
+        the existing files so local-change detection keeps working, but nothing
+        is downloaded, overwritten, or modified. Returns True if a new baseline
+        was established.
+        """
+        baseline = self._virtual_adoption(project)
+        if not baseline:
+            return False
+        self._log_info(
+            f"adopting existing {project.id} as a tracked install "
+            f"(version {baseline['version']}) from {project.install_dir(self.root)}")
+        self._write_metadata(project, baseline)
+        return True
+
     # -- status -------------------------------------------------------------------
 
     def status_entry(self, project: ProjectManifest) -> dict[str, Any]:
         base = project.to_dict()
+        self._adopt_if_unmanaged(project)
         current = self.current_version(project)
         local = self.local_changes(project)
         stored = self.state.get(project.id)
@@ -196,6 +259,13 @@ class UpdateManager:
             else:
                 status = "missing"
 
+        try:
+            health = self.health.run(project, backend_alive=True)
+        except Exception as exc:  # a failing health probe must not break status
+            health = {"ok": False, "checks": [], "error": str(exc)}
+
+        backups = self.backup.list(project=project.id)
+
         entry = {
             **base,
             "current": current,
@@ -207,6 +277,19 @@ class UpdateManager:
             "last_check": stored.get("last_check"),
             "error": error,
             "staged_ref": stored.get("staged_ref"),
+            "health": {
+                "ok": bool(health.get("ok")),
+                "checks": health.get("checks", []),
+                "error": health.get("error"),
+            },
+            "build": {
+                "required": project.build_strategy not in ("none",) or bool(project.build_command),
+                "last": stored.get("build_status"),
+                "detail": stored.get("build_detail"),
+            },
+            "backup_available": len(backups),
+            "rollback_available": len(backups),
+            "adopted": bool(stored.get("adopted")),
         }
         return entry
 
@@ -279,8 +362,17 @@ class UpdateManager:
             self._log_warn(f"check failed for {project.id}: {exc}")
             return self._error_plan(project, str(exc))
 
-        current = self.current_version(project)
-        local = self.local_changes(project)
+        current = None
+        local = None
+        if dry_run:
+            # A check must never modify anything: adopt virtually only.
+            virtual = self._virtual_adoption(project)
+            current = self.current_version(project, meta=virtual)
+            local = self.local_changes(project, meta=virtual)
+        else:
+            self._adopt_if_unmanaged(project)
+            current = self.current_version(project)
+            local = self.local_changes(project)
         status, would_update = self._status_from(project, current, available)
         development = bool(available.get("development"))
         requires_confirmation = bool(local.get("detected") or not local.get("tracked"))
@@ -368,7 +460,8 @@ class UpdateManager:
         plan = self._build_plan(project, dry_run=False)
         if plan["status"] == "error":
             self.history.add({"project": project.id, "old_version": plan["current"].get("version"),
-                              "new_version": None, "result": "failed", "error": plan["error"]})
+                              "new_version": None, "result": "failed", "error": plan["error"],
+                              "build_result": None, "health_result": None})
             return {"ok": False, "project_id": project.id, "result": "failed",
                     "error": plan["error"], "status": "error"}
 
@@ -415,7 +508,8 @@ class UpdateManager:
                 "old_version": old_version, "new_ref": new_ref, "new_version": new_version})
         except (OSError, ValueError) as exc:
             self.history.add({"project": project.id, "old_version": old_version,
-                              "new_version": new_version, "result": "failed", "error": f"backup failed: {exc}"})
+                              "new_version": new_version, "result": "failed", "error": f"backup failed: {exc}",
+                              "build_result": None, "health_result": None})
             return {"ok": False, "project_id": project.id, "result": "failed",
                     "error": f"backup failed: {exc}"}
 
@@ -480,7 +574,9 @@ class UpdateManager:
                        last_check=_now_iso(), last_error=None)
         self.history.add({"project": project.id, "old_version": old_version,
                           "new_version": new_version, "result": "staged",
-                          "backup_id": backup_id, "rollback_status": None})
+                          "backup_id": backup_id, "rollback_status": None,
+                          "build_result": None,
+                          "health_result": {"ok": True, "checks": []}})
         self._log_ok(f"{project.id} staged version {new_version or new_ref} "
                      "(apply on next launch / manual checkout)")
         return {"ok": True, "project_id": project.id, "result": "staged",
@@ -535,7 +631,10 @@ class UpdateManager:
 
         self.history.add({"project": project.id, "old_version": old_version,
                           "new_version": new_version, "result": "success",
-                          "backup_id": backup_id, "rollback_status": None})
+                          "backup_id": backup_id, "rollback_status": None,
+                          "build_result": build_result,
+                          "health_result": {"ok": bool(health.get("ok")),
+                                            "checks": health.get("checks", [])}})
         self._log_ok(f"{project.id} updated to {new_version or new_ref} (backup {backup_id})")
         return {"ok": True, "project_id": project.id, "result": "success",
                 "status": "updated", "old_version": old_version,
@@ -690,22 +789,34 @@ class UpdateManager:
             raise UpdateManagerError(f"rollback failed: {exc}") from exc
 
         old_version = version_info.get("old_version")
+        build_result = None
+        if restored.get("project_restored"):
+            build_result = self._rebuild_after_rollback(project)
         health = self.health.run(project, backend_alive=True)
         rollback_ok = restored["project_restored"] or not project.install_path
+        if build_result and build_result.get("failed"):
+            rollback_ok = False
         self.history.add({"project": project.id,
                           "old_version": version_info.get("new_version"),
                           "new_version": old_version,
                           "result": "rolled-back",
                           "backup_id": backup_id,
-                          "rollback_status": "ok" if rollback_ok else "degraded"})
+                          "rollback_status": "ok" if rollback_ok else "degraded",
+                          "build_result": build_result,
+                          "health_result": {"ok": bool(health.get("ok")),
+                                            "checks": health.get("checks", [])}})
         self._log_ok(f"rollback complete for {project.id} (backup {backup_id})")
         return {
             "ok": rollback_ok,
             "project_id": project.id,
             "backup_id": backup_id,
             "restored": restored,
+            "build": build_result,
             "health": health,
-            "error": None if rollback_ok else "project directory was not fully restored",
+            "error": None if rollback_ok else (
+                "project directory was not fully restored"
+                if not restored.get("project_restored") else
+                "component could not be rebuilt after rollback"),
         }
 
     # -- misc ---------------------------------------------------------------------------
@@ -721,23 +832,50 @@ class UpdateManager:
         self.history.add({"project": project.id, "old_version": old_version,
                           "new_version": new_version, "result": "failed",
                           "error": error, "backup_id": backup_id,
-                          "rollback_status": None})
+                          "rollback_status": None,
+                          "build_result": None, "health_result": None})
         self._log_err(f"update failed for {project.id}: {error}")
 
     def _auto_rollback(self, project: ProjectManifest, backup_id: str,
                        old_version: Any, new_version: Any, error: str) -> dict:
         try:
             restored = self.backup.restore(backup_id, project)
+            build_result = None
+            if restored.get("project_restored"):
+                build_result = self._rebuild_after_rollback(project)
             health = self.health.run(project, backend_alive=True)
+            rollback_ok = restored.get("project_restored", False) or not project.install_path
+            if build_result and build_result.get("failed"):
+                rollback_ok = False
             self.history.add({"project": project.id, "old_version": old_version,
                               "new_version": new_version, "result": "rolled-back",
                               "error": error, "backup_id": backup_id,
-                              "rollback_status": "ok"})
+                              "rollback_status": "ok" if rollback_ok else "degraded",
+                              "build_result": build_result,
+                              "health_result": {"ok": bool(health.get("ok")),
+                                                "checks": health.get("checks", [])}})
             self._log_warn(f"{project.id} automatically rolled back to backup {backup_id}")
-            return {"restored": True, "health": health, "error": None}
+            return {"restored": rollback_ok, "build": build_result, "health": health,
+                    "error": None if rollback_ok else "component not fully restored after rollback"}
         except Exception as exc:  # pragma: no cover - defensive
             self._log_err(f"automatic rollback failed for {project.id}: {exc}")
             return {"restored": False, "error": f"rollback failed: {exc}"}
+
+    def _rebuild_after_rollback(self, project: ProjectManifest) -> Optional[dict[str, Any]]:
+        """Rebuild a component after its source was restored, so the built
+        artifact (e.g. the bundled Network Checker) matches the restored tree.
+
+        Never raises: a rebuild failure is reported, not fatal.
+        """
+        if project.build_strategy == "none" and not project.build_command:
+            return None
+        try:
+            result = self._build(project)
+        except Exception as exc:  # pragma: no cover - defensive
+            return {"ran": False, "failed": True, "error": str(exc)}
+        if result and result.get("failed"):
+            self._log_err(f"rebuild after rollback failed for {project.id}: {result.get('error')}")
+        return result
 
 
 # ---------------------------------------------------------------------------

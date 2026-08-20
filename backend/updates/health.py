@@ -7,11 +7,12 @@ declares which checks apply in its manifest's ``health_checks`` list.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from ..services.network_checker import bundle_detected
+from ..services.network_checker import bundle_detected, bundle_path
 from ..version import get_version
 from .manifest import ProjectManifest
 
@@ -74,9 +75,14 @@ class HealthCheckManager:
         if name == "network-checker-bundle":
             try:
                 found = bundle_detected()
-            except Exception:  # pragma: no cover - defensive
-                found = False
-            return found, ("bundle detected" if found else "Network Checker bundle not found")
+                exe = bundle_path()
+                if found and exe is not None and os.access(exe, os.X_OK):
+                    return True, f"bundle detected and executable: {exe}"
+                if found and exe is not None:
+                    return False, f"bundle found but not executable: {exe}"
+                return False, "Network Checker bundle not found"
+            except Exception as exc:  # pragma: no cover - defensive
+                return False, f"Network Checker bundle check errored: {exc}"
         if name == "install-exists":
             install_dir = project.install_dir(self._root)
             ok = install_dir.exists() and any(install_dir.iterdir())
