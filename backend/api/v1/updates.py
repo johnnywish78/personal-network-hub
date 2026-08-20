@@ -7,14 +7,17 @@ Nothing here returns or accepts credentials.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ...updates.manager import UpdateManagerError
 from ...updates.self_update import (_validate_staged, clear_pending_apply,
-                                    pending_apply_info, request_apply, runtime_mode)
+                                    find_appimage_asset, pending_apply_info,
+                                    request_appimage_apply, request_apply,
+                                    resolve_appimage_target, runtime_mode,
+                                    sha256_file, stage_appimage)
 from ...services.state import AppState
 from .deps import get_state
 
@@ -34,6 +37,36 @@ class UpdateRequest(BaseModel):
 class UpdateAllRequest(BaseModel):
     confirm: bool = False
     dry_run: bool = False
+
+
+class StageAppImageRequest(BaseModel):
+    artifact_path: Optional[str] = None
+    artifact_url: Optional[str] = None
+
+
+def _live_appimage_download(project, source) -> tuple[str, Any, Any]:
+    """Discover the latest release's AppImage asset and download it into the
+    update cache. Returns ``(artifact_path, version, release_tag)``; raises
+    HTTPException with a human-readable reason when nothing can be staged.
+    """
+    try:
+        available = source.check_available(project)
+    except UpdateManagerError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    asset = find_appimage_asset(available)
+    if not asset:
+        raise HTTPException(400, (
+            "no AppImage asset found on the latest release. The release may "
+            "be reachable but publish only source archives."))
+    try:
+        from ...storage.paths import update_cache_dir
+        cache = update_cache_dir()
+        cache.mkdir(parents=True, exist_ok=True)
+        downloaded = source.download_asset(project, asset, cache)
+    except UpdateManagerError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return (str(downloaded), (available or {}).get("version"),
+            (available or {}).get("release_tag"))
 
 
 # --- Project Registry -----------------------------------------------------
@@ -60,6 +93,9 @@ def updates_overview(state: AppState = Depends(get_state)):
     data = state.updates.status_all(check=False)
     data["runtime"] = runtime_mode()
     data["pending_apply"] = pending_apply_info()
+    target = resolve_appimage_target()
+    data["appimage_target"] = target
+    data["appimage_sha256"] = sha256_file(target) if target else None
     return data
 
 
@@ -126,11 +162,75 @@ def list_backups(project: Optional[str] = None, state: AppState = Depends(get_st
 @updates_router.get("/runtime")
 def runtime(state: AppState = Depends(get_state)):
     """How JPNH is running (source/appimage/deb) + pending self-update info."""
+    target = resolve_appimage_target()
     return {
         "mode": runtime_mode(),
         "appimage": __import__("backend.updates.self_update", fromlist=["appimage_target"]).appimage_target(),
+        "appimage_target": target,
+        "appimage_sha256": sha256_file(target) if target else None,
         "pending_apply": pending_apply_info(),
     }
+
+
+@updates_router.post("/{project_id}/stage-appimage")
+def stage_appimage_update(project_id: str, body: StageAppImageRequest,
+                          state: AppState = Depends(get_state)):
+    """Download (or take from a local fixture) the AppImage release artifact for
+    a staging-only project and bring it into the update cache, validated.
+
+    Only meaningful for packaged AppImage installs; the desktop updater applies
+    the staged artifact to the installed AppImage on the next launch.
+    """
+    manager = state.updates
+    project = manager.registry.get(project_id)
+    if not project or not project.staging_only:
+        raise HTTPException(400, "AppImage self-update is only available for staging-only projects")
+    mode = runtime_mode()
+    if mode == "deb":
+        raise HTTPException(400, (
+            "JPNH is installed as a package; AppImage updates are not applied. "
+            "Install the new JPNH release instead."))
+
+    source = manager.source_for(project)
+    if body.artifact_url or body.artifact_path is None:
+        # live download from the latest release metadata (also the UI default
+        # when the stage request carries an empty body)
+        artifact_path, version, release_tag = _live_appimage_download(project, source)
+    else:
+        artifact_path = body.artifact_path
+        version = None
+        release_tag = None
+
+    result = stage_appimage(manager, project, artifact_path,
+                            release_tag=release_tag, version=version)
+    if not result.get("ok"):
+        raise HTTPException(400, result["error"])
+    return {"ok": True, "project_id": project_id, "staged": result}
+
+
+@updates_router.post("/{project_id}/apply-appimage")
+def apply_appimage_update(project_id: str, state: AppState = Depends(get_state)):
+    """Request that the staged AppImage be applied to the installed AppImage on
+    the next launch. The desktop updater performs an atomic replacement.
+
+    Only valid while running as an AppImage: a source tree cannot be replaced by
+    an AppImage and a DEB install must keep using the package.
+    """
+    manager = state.updates
+    project = manager.registry.get(project_id)
+    if not project or not project.staging_only:
+        raise HTTPException(400, "AppImage self-update is only available for staging-only projects")
+    mode = runtime_mode()
+    if mode != "appimage":
+        raise HTTPException(400, (
+            "JPNH is not running as an AppImage; the AppImage apply flow is only "
+            "available while the installed app is the AppImage binary."))
+    try:
+        payload = request_appimage_apply(manager, project)
+    except UpdateManagerError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "pending": payload,
+            "note": "JPNH will replace the installed AppImage atomically on the next launch."}
 
 
 @updates_router.post("/{project_id}/restart-apply")

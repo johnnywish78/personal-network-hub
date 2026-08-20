@@ -59,6 +59,8 @@ const viewState = {
   operation: "",
   runtime: "source",
   pendingApply: null,
+  appimageTarget: null,
+  appimageSha256: null,
 };
 
 function setOperation(projectId, text) {
@@ -183,13 +185,15 @@ function actionRow(project, onChanged) {
 function coreActions(project, onChanged, actions) {
   const { el, toast, confirmDialog, openExternal } = window.ui;
   const busy = viewState.busyProject === project.id;
-  const stagedReady = !!project.staged_ref && viewState.pendingApply === null;
   const packaged = viewState.runtime !== "source";
+
+  if (packaged && viewState.runtime === "appimage") {
+    return appimageCoreActions(project, onChanged, actions);
+  }
 
   if (packaged) {
     actions.appendChild(el("span", "meta muted mono",
-      "JPNH Core ships inside this " + (viewState.runtime === "appimage" ? "AppImage" : "package") +
-      ". Install the new JPNH release to update it."));
+      "JPNH Core ships inside this package. Install the new JPNH release to update it."));
     if (project.repository) {
       const rel = el("button", "btn small ghost", "Releases");
       rel.addEventListener("click", () => openExternal("https://github.com/" + project.repository + "/releases"));
@@ -197,6 +201,8 @@ function coreActions(project, onChanged, actions) {
     }
     return actions;
   }
+
+  const stagedReady = !!project.staged_ref && viewState.pendingApply === null;
 
   if (stagedReady) {
     const btn = el("button", "btn small primary", "Restart & Update");
@@ -221,6 +227,101 @@ function coreActions(project, onChanged, actions) {
     actions.appendChild(link);
   }
   return actions;
+}
+
+// AppImage self-update flow: the user downloads the new AppImage release
+// artifact, then restarts so the startup updater atomically replaces the
+// INSTALLED AppImage (the file the desktop launcher runs) and relaunches into
+// it. Nothing is ever truncated; the old binary is preserved as .old until the
+// new build starts successfully.
+function appimageCoreActions(project, onChanged, actions) {
+  const { el, toast, confirmDialog, openExternal } = window.ui;
+  const busy = viewState.busyProject === project.id;
+  const pending = viewState.pendingApply;
+  const stagedArtifact = project.staged_artifact || (pending && pending.appimage_artifact);
+
+  actions.appendChild(el("span", "meta muted mono",
+    "installed AppImage: " + (viewState.appimageTarget || "unknown")));
+
+  if (pending && pending.appimage_artifact) {
+    const btn = el("button", "btn small primary", "Restart & Apply");
+    btn.addEventListener("click", () => restartAndUpdateAppImage(project, onChanged));
+    actions.appendChild(btn);
+    if (project.staged_artifact_sha256) {
+      actions.appendChild(el("span", "meta mono",
+        "staged sha256: " + String(project.staged_artifact_sha256).slice(0, 16) + "…"));
+    }
+    return actions;
+  }
+
+  if (stagedArtifact) {
+    const btn = el("button", "btn small primary", "Restart & Apply");
+    btn.addEventListener("click", () => restartAndUpdateAppImage(project, onChanged));
+    actions.appendChild(btn);
+    if (project.staged_artifact_sha256) {
+      actions.appendChild(el("span", "meta mono",
+        "staged sha256: " + String(project.staged_artifact_sha256).slice(0, 16) + "…"));
+    }
+    return actions;
+  }
+
+  if (project.status === "update-available" && !busy) {
+    const btn = el("button", "btn small primary", "Download AppImage");
+    btn.addEventListener("click", () => downloadAppImage(project, onChanged));
+    actions.appendChild(btn);
+  } else if (busy) {
+    actions.appendChild(el("span", "spinner", ""));
+  }
+  if (project.repository) {
+    const rel = el("button", "btn small ghost", "Releases");
+    rel.addEventListener("click", () => openExternal("https://github.com/" + project.repository + "/releases"));
+    actions.appendChild(rel);
+  }
+  return actions;
+}
+
+function downloadAppImage(project, onChanged) {
+  const { toast, confirmDialog } = window.ui;
+  confirmDialog(
+    "Download AppImage",
+    `Download the latest JPNH AppImage and apply it to the installed AppImage (` +
+    (viewState.appimageTarget || "the desktop launcher target") + `)?\n\n` +
+    `On restart, JPNH atomically replaces the installed AppImage (the old one is kept as .old until the new build starts) and relaunches.`,
+    async () => {
+      setOperation(project.id, "Downloading the JPNH AppImage…");
+      onChanged();
+      try {
+        const r = await window.api.post(`/updates/${project.id}/stage-appimage`, {});
+        if (r.ok && r.staged && r.staged.ok) {
+          toast("AppImage downloaded and validated. Restart to apply.", "ok");
+        } else {
+          toast(r.error || (r.staged && r.staged.error) || "could not stage the AppImage", "bad");
+        }
+      } catch (err) {
+        toast(err.message, "bad");
+      }
+      setOperation(null, "");
+      onChanged();
+    });
+}
+
+function restartAndUpdateAppImage(project, onChanged) {
+  const { toast, confirmDialog } = window.ui;
+  confirmDialog(
+    "Restart & Apply AppImage",
+    `JPNH will quit now. On the next launch the installed AppImage is replaced ` +
+    `atomically (old binary kept as .old until the new build starts) and JPNH ` +
+    `relaunches into the updated AppImage.\n\nContinue?`,
+    async () => {
+      try {
+        const r = await window.api.post(`/updates/${project.id}/apply-appimage`);
+        if (!r.ok) { toast(r.error || "could not schedule the AppImage apply", "bad"); return; }
+        toast("Restarting to apply the AppImage update…", "info");
+        setTimeout(() => { if (window.jpnh && window.jpnh.quit) window.jpnh.quit(); }, 400);
+      } catch (err) {
+        toast(err.message, "bad");
+      }
+    });
 }
 
 function restartAndUpdate(project, onChanged) {
@@ -437,6 +538,8 @@ window.Views.updates = {
         cache.set(data);
         viewState.runtime = data.runtime || "source";
         viewState.pendingApply = data.pending_apply || null;
+        viewState.appimageTarget = data.appimage_target || null;
+        viewState.appimageSha256 = data.appimage_sha256 || null;
       } catch (err) {
         toast("Could not load update status: " + err.message, "bad");
       }

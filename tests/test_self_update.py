@@ -654,3 +654,189 @@ def test_apply_pending_cli_refuses_staged_outside_cache(tmp_path, capsys, monkey
     assert "outside the update cache" in result["error"]
     assert (root / "VERSION").read_text() == "0.1.0"
     assert pending_apply_info() is not None  # marker untouched
+
+# ---------------------------------------------------------------------------
+# AppImage self-update helpers + API
+# ---------------------------------------------------------------------------
+
+def _fake_appimage(directory: Path, name: str, chmod: int = 0o755) -> Path:
+    """A structurally valid AppImage fixture: ELF magic + AI\x02 type marker."""
+    p = directory / name
+    directory.mkdir(parents=True, exist_ok=True)
+    head = bytearray(4096)
+    head[0:4] = b"\x7fELF"
+    head[8:11] = b"AI\x02"
+    payload = bytes(head) + b"x" * (2 * 1024 * 1024 - len(head))
+    p.write_bytes(payload)
+    os.chmod(p, chmod)
+    return p
+
+
+def test_find_appimage_asset_prefers_version_matching():
+    from backend.updates.self_update import find_appimage_asset
+    available = {
+        "version": "0.2.0",
+        "assets": [
+            {"name": "JPNH-0.1.0-linux.AppImage", "url": "a", "size": 1},
+            {"name": "JPNH-0.2.0-linux-x86_64.AppImage", "url": "b", "size": 2},
+            {"name": "source.tar.gz", "url": "c", "size": 3},
+        ],
+    }
+    asset = find_appimage_asset(available)
+    assert asset["name"] == "JPNH-0.2.0-linux-x86_64.AppImage"
+    assert find_appimage_asset(None) is None
+    assert find_appimage_asset({"version": "0.1.0", "assets": []}) is None
+
+
+def test_validate_appimage_artifact_checks_magic_size_and_executable(tmp_path):
+    from backend.updates.self_update import validate_appimage_artifact
+    good = _fake_appimage(tmp_path, "JPNH.AppImage")
+    assert validate_appimage_artifact(good) is None
+
+    bad_magic = tmp_path / "bad-magic.AppImage"
+    bad_magic.write_bytes(b"\x7fELF" + b"x" * (2 * 1024 * 1024))
+    os.chmod(bad_magic, 0o755)
+    assert "not an AppImage" in validate_appimage_artifact(bad_magic)
+
+    not_elf = tmp_path / "not-elf.AppImage"
+    not_elf.write_bytes(b"hello" + b"x" * (2 * 1024 * 1024))
+    os.chmod(not_elf, 0o755)
+    assert "ELF" in validate_appimage_artifact(not_elf)
+
+    tiny = tmp_path / "tiny.AppImage"
+    tiny.write_bytes(b"\x7fELFAI\x02")
+    os.chmod(tiny, 0o755)
+    assert "too small" in validate_appimage_artifact(tiny)
+
+    not_exec = _fake_appimage(tmp_path, "JPNH-noexec.AppImage", chmod=0o644)
+    assert "not executable" in validate_appimage_artifact(not_exec)
+
+    assert validate_appimage_artifact(tmp_path / "missing.AppImage") is not None
+
+
+def test_stage_appimage_copies_validated_artifact_into_cache(tmp_path):
+    from backend.updates.self_update import sha256_file, stage_appimage
+    from backend.storage.paths import update_cache_dir
+    root, manifest = make_project(tmp_path)
+    manager = make_manager(tmp_path, manifest, source=None)
+    artifact = _fake_appimage(tmp_path, "JPNH-0.2.0.AppImage")
+
+    result = stage_appimage(manager, manifest, artifact, release_tag="v0.2.0", version="0.2.0")
+    assert result["ok"] is True
+    staged = Path(result["artifact"])
+    assert staged.is_relative_to(update_cache_dir())
+    assert staged.name.endswith(".AppImage")
+    assert result["sha256"] == sha256_file(staged) and len(result["sha256"]) == 64
+    stored = manager.state.get(manifest.id)
+    assert stored.get("staged_artifact") == str(staged)
+
+    # staging an invalid artifact is refused
+    bad = tmp_path / "bad.AppImage"
+    bad.write_text("nope")
+    result = stage_appimage(manager, manifest, bad, release_tag="v0.2.0")
+    assert result["ok"] is False
+
+
+def test_request_appimage_apply_writes_marker(tmp_path, monkeypatch):
+    from backend.updates.self_update import (pending_apply_info, request_appimage_apply,
+                                             stage_appimage)
+    root, manifest = make_project(tmp_path)
+    manager = make_manager(tmp_path, manifest, source=None)
+    artifact = _fake_appimage(tmp_path, "JPNH-0.2.0.AppImage")
+    stage_appimage(manager, manifest, artifact, release_tag="v0.2.0", version="0.2.0")
+
+    import backend.updates.self_update as su
+    monkeypatch.setattr(su, "resolve_appimage_target", lambda: "/opt/installed/JPNH.AppImage")
+    payload = request_appimage_apply(manager, manifest)
+    assert payload["mode"] == "appimage"
+    assert payload["appimage_artifact"] is not None
+    assert payload["sha256"]
+    assert payload["target"] == "/opt/installed/JPNH.AppImage"
+    info = pending_apply_info()
+    assert info["appimage_artifact"] == payload["appimage_artifact"]
+
+
+def test_api_stage_appimage_with_local_fixture(api_client, tmp_path, monkeypatch):
+    from backend.api.v1 import updates as api_updates
+    monkeypatch.setattr(api_updates, "runtime_mode", lambda: "appimage")
+    artifact = _fake_appimage(tmp_path, "JPNH-0.2.0.AppImage")
+    r = api_client.post("/updates/jpnh-core/stage-appimage",
+                        json={"artifact_path": str(artifact)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["staged"]["sha256"]
+    assert Path(body["staged"]["artifact"]).exists()
+
+
+def test_api_apply_appimage_refuses_when_not_running_as_appimage(api_client, tmp_path, monkeypatch):
+    from backend.api.v1 import updates as api_updates
+    monkeypatch.setattr(api_updates, "runtime_mode", lambda: "source")
+    r = api_client.post("/updates/jpnh-core/apply-appimage")
+    assert r.status_code == 400
+    assert "not running as an AppImage" in r.json()["detail"]
+
+
+def test_api_apply_appimage_writes_marker_in_appimage_mode(api_client, tmp_path, monkeypatch):
+    from backend.api.v1 import updates as api_updates
+    from backend.storage.paths import update_cache_dir
+    monkeypatch.setattr(api_updates, "runtime_mode", lambda: "appimage")
+    import backend.updates.self_update as su
+    monkeypatch.setattr(su, "resolve_appimage_target", lambda: "/opt/installed/JPNH.AppImage")
+
+    artifact = _fake_appimage(tmp_path, "JPNH-0.2.0.AppImage")
+    r = api_client.post("/updates/jpnh-core/stage-appimage",
+                        json={"artifact_path": str(artifact)})
+    assert r.status_code == 200
+
+    r = api_client.post("/updates/jpnh-core/apply-appimage")
+    assert r.status_code == 200, r.text
+    payload = r.json()["pending"]
+    assert payload["mode"] == "appimage"
+    assert payload["appimage_artifact"] is not None
+    assert payload["sha256"]
+
+    # apply-appimage with the marker cleared but the artifact still staged is a
+    # repeated request -> it re-writes the marker (idempotent re-request)
+    api_client.post("/updates/pending-apply/clear")
+    r = api_client.post("/updates/jpnh-core/apply-appimage")
+    assert r.status_code == 200, r.text
+    payload2 = r.json()["pending"]
+    assert payload2["appimage_artifact"] == payload["appimage_artifact"]
+
+
+def test_api_stage_appimage_rejects_deb_mode(api_client, tmp_path, monkeypatch):
+    from backend.api.v1 import updates as api_updates
+    monkeypatch.setattr(api_updates, "runtime_mode", lambda: "deb")
+    artifact = _fake_appimage(tmp_path, "JPNH-0.2.0.AppImage")
+    r = api_client.post("/updates/jpnh-core/stage-appimage",
+                        json={"artifact_path": str(artifact)})
+    assert r.status_code == 400
+    assert "package" in r.json()["detail"]
+
+
+def test_resolve_appimage_target_from_desktop_entry(tmp_path, monkeypatch):
+    from backend.updates.self_update import resolve_appimage_target
+    installed = _fake_appimage(tmp_path, "Johnny-Network-Hub.AppImage")
+    apps = tmp_path / ".local" / "share" / "applications"
+    apps.mkdir(parents=True)
+    (apps / "jpnh.desktop").write_text(
+        '[Desktop Entry]\nType=Application\nName=Johnny Network Hub\n'
+        f'Exec="{installed}" --no-sandbox %U\nIcon=jpnh\nStartupWMClass=jpnh\n')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    assert resolve_appimage_target() == str(installed)
+
+    monkeypatch.setenv("APPIMAGE", str(installed))
+    assert resolve_appimage_target() == str(installed)
+
+
+def test_api_overview_reports_appimage_target(api_client, tmp_path, monkeypatch):
+    installed = _fake_appimage(tmp_path, "Johnny-Network-Hub.AppImage")
+    from backend.api.v1 import updates as api_updates
+    api_updates.resolve_appimage_target = lambda: str(installed)
+    r = api_client.get("/updates")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["appimage_target"] == str(installed)
+    assert body["appimage_sha256"]

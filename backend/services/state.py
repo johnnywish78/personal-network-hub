@@ -38,6 +38,7 @@ class AppState:
         self.github = GitHubClient(token_provider=lambda: self.vault.get("github_token"))
         self.update_history = UpdateHistory()
         self.updates = UpdateManager(
+            token_provider=lambda: self.vault.get("github_token"),
             log=lambda level, source, message: self.logs.log(level, source, message))
 
     def client_status(self) -> list[dict]:

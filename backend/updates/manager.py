@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..storage.paths import update_cache_dir
+from ..storage.credential_store import CredentialStore
 from .backup import BackupManager
 from .health import HealthCheckManager, current_jpnh_version
 from .history import UpdateHistory
@@ -56,7 +57,8 @@ class UpdateManager:
                  backup: Optional[BackupManager] = None,
                  health: Optional[HealthCheckManager] = None,
                  root: Optional[Path] = None,
-                 log: Optional[Callable[[str, str, str], None]] = None):
+                 log: Optional[Callable[[str, str, str], None]] = None,
+                 token_provider: Optional[Callable[[], Optional[str]]] = None):
         self.registry = registry or ProjectRegistry()
         self.state = state or UpdateState()
         self.history = history or UpdateHistory()
@@ -64,6 +66,7 @@ class UpdateManager:
         self.health = health or HealthCheckManager(root=root)
         self.root = root or Path(__file__).resolve().parents[2]
         self._log = log or (lambda _level, _src, _msg: None)
+        self._token_provider = token_provider or (lambda: None)
 
     # -- helpers ---------------------------------------------------------------
 
@@ -74,7 +77,7 @@ class UpdateManager:
 
     def source_for(self, manifest: ProjectManifest) -> UpdateSource:
         if manifest.source_type in ("github", "git"):
-            return GitHubSource()
+            return GitHubSource(token_provider=self._token_provider)
         if manifest.source_type in ("local", "none"):
             return LocalSource()
         raise UpdateManagerError(f"no source implementation for '{manifest.source_type}'")
@@ -232,6 +235,7 @@ class UpdateManager:
         stored = self.state.get(project.id)
         status = "unknown"
         error = None
+        cached_available = None
 
         if not project.enabled:
             status = "disabled"
@@ -243,14 +247,19 @@ class UpdateManager:
             if cached_ref:
                 cached_available = {
                     "ref": cached_ref,
-                    "ref_type": "commit",
+                    "ref_type": stored.get("available_ref_type") or "commit",
                     "version": stored.get("available_version"),
                     "release_tag": stored.get("available_release_tag"),
-                    "published_at": None,
-                    "url": f"https://github.com/{project.repository}",
+                    "published_at": stored.get("available_published_at"),
+                    "url": stored.get("available_url") or f"https://github.com/{project.repository}",
                     "development": bool(stored.get("development")),
+                    "assets": stored.get("available_assets") or [],
                 }
                 status, _ = self._status_from(project, current, cached_available)
+                error = stored.get("last_error")
+            elif stored.get("last_error"):
+                # a failed check is surfaced, never silently swallowed as "unknown"
+                status = "error"
                 error = stored.get("last_error")
             elif current.get("tracked"):
                 status = "unknown"  # installed and managed, never checked upstream
@@ -271,12 +280,14 @@ class UpdateManager:
             "current": current,
             "local_changes": local,
             "status": status,
-            "available": None,
+            "available": cached_available,
             "note": None,
             "last_update": stored.get("updated_at"),
             "last_check": stored.get("last_check"),
             "error": error,
             "staged_ref": stored.get("staged_ref"),
+            "staged_artifact": stored.get("staged_artifact"),
+            "staged_artifact_sha256": stored.get("staged_artifact_sha256"),
             "health": {
                 "ok": bool(health.get("ok")),
                 "checks": health.get("checks", []),
@@ -398,9 +409,13 @@ class UpdateManager:
         self.state.set(project.id, last_check=_now_iso(),
                        last_error=None,
                        available_ref=available.get("ref"),
+                       available_ref_type=available.get("ref_type"),
                        available_version=available.get("version"),
                        available_release_tag=available.get("release_tag"),
+                       available_url=available.get("url"),
+                       available_published_at=available.get("published_at"),
                        development=bool(available.get("development")),
+                       available_assets=available.get("assets") or [],
                        available_status=status)
         return plan
 

@@ -243,7 +243,22 @@ app.whenReady().then(async () => {
       log("self-update pending but not applied:", selfUpdate.error || "unknown");
     }
     if (selfUpdate.applied && selfUpdate.relaunch) {
-      log("relaunching into the updated AppImage");
+      if (selfUpdate.mode === "appimage") {
+        // For AppImage builds Electron's execPath is the mountpoint of the
+        // running image; spawning that would run the OLD bytes. Spawn the
+        // AppImage file itself (now replaced with the new version) with the
+        // original arguments (e.g. --no-sandbox).
+        const rl = updater.relaunchAppImage();
+        if (rl) {
+          log("relaunching into updated AppImage:", rl.file, rl.args.join(" "));
+          const { spawn } = require("child_process");
+          const child = spawn(rl.file, rl.args, { stdio: "inherit", detached: true });
+          child.unref();
+          app.exit(0);
+          return;
+        }
+      }
+      log("relaunching into the updated app");
       app.relaunch();
       app.exit(0);
       return;

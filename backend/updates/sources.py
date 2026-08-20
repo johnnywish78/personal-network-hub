@@ -77,9 +77,18 @@ class GitHubSource(UpdateSource):
     preferred; development commits are only used when explicitly requested.
     """
 
-    def __init__(self, http: Optional[httpx.Client] = None, timeout: float = 30.0):
+    def __init__(
+        self,
+        http: Optional[httpx.Client] = None,
+        timeout: float = 30.0,
+        token_provider: Optional[callable] = None,
+    ):
         self._timeout = timeout
-        self._http = http or _build_client(timeout)
+        self._token_provider = token_provider or (lambda: None)
+        self._http = http or _build_client(
+            timeout,
+            token_provider=self._token_provider,
+        )
 
     # -- network primitives (monkeypatch these in tests) ---------------------
 
@@ -128,7 +137,7 @@ class GitHubSource(UpdateSource):
         info: dict[str, Any] = {"ref": None, "ref_type": "commit",
                                 "version": None, "release_tag": None,
                                 "published_at": None, "url": f"https://github.com/{repo}",
-                                "development": False}
+                                "development": False, "assets": []}
 
         # Always verify the repository itself first. This makes error
         # classification unambiguous: a missing/private repository, an auth or
@@ -224,6 +233,12 @@ class GitHubSource(UpdateSource):
             "release_tag": tag,
             "published_at": (release or {}).get("published_at"),
         }
+        if release:
+            info["assets"] = [
+                {"name": a.get("name"), "url": a.get("browser_download_url"),
+                 "size": a.get("size"), "content_type": a.get("content_type")}
+                for a in release.get("assets") or []
+            ]
         info.update(commit or {})
         return info
 
@@ -286,6 +301,56 @@ class GitHubSource(UpdateSource):
             raise UpdateSourceError(f"downloaded archive for {repo}@{ref} was empty or malformed")
         return extracted
 
+    def download_asset(self, manifest: ProjectManifest, asset: dict,
+                       dest_dir: Any) -> Path:
+        """Download a release asset (e.g. an AppImage) into ``dest_dir``.
+
+        Returns the local path of the downloaded asset. The size recorded by
+        the release metadata is verified after the transfer; a mismatch is
+        treated as a corrupt download.
+        """
+        url = asset.get("url") or asset.get("browser_download_url")
+        if not url:
+            raise UpdateSourceError("release asset has no download url")
+        if not str(url).startswith(("https://", "http://")):
+            raise UpdateSourceError("release asset url is not an http(s) url")
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        name = asset.get("name") or str(url).rsplit("/", 1)[-1]
+        dest = dest_dir / name
+        try:
+            with self._http.stream("GET", url) as resp:
+                if resp.status_code == 404:
+                    raise UpdateSourceError(f"release asset not found: {name}")
+                if resp.status_code in (401, 403):
+                    raise UpdateSourceError(
+                        "GitHub rejected the asset download (rate limit or auth). "
+                        "Retry later or set a GitHub token in the vault.")
+                if resp.status_code == 429:
+                    raise UpdateSourceError("GitHub rate limit reached. Retry in a few minutes.")
+                if resp.status_code != 200:
+                    raise UpdateSourceError(
+                        f"asset download failed for {name} (HTTP {resp.status_code})")
+                with open(dest, "wb") as fh:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        fh.write(chunk)
+        except httpx.HTTPError as exc:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise UpdateSourceError(_network_message(exc)) from exc
+        expected = asset.get("size")
+        if expected and dest.stat().st_size != expected:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise UpdateSourceError(
+                f"downloaded asset size does not match the release metadata "
+                f"(expected {expected}, got {dest.stat().st_size})")
+        return dest
+
 
 class LocalSource(UpdateSource):
     """A managed-but-locally-defined project with no external source."""
@@ -318,17 +383,29 @@ def _network_message(exc: Exception) -> str:
     return f"network error: {msg[:300]}"
 
 
-def _build_client(timeout: float) -> httpx.Client:
-    """Create an HTTP client that honours standard proxy env variables.
+def _build_client(
+    timeout: float,
+    token_provider: Optional[callable] = None,
+) -> httpx.Client:
+    """Create an HTTP client with optional GitHub authentication.
 
-    ``HTTP_PROXY``/``HTTPS_PROXY``/``ALL_PROXY``/``NO_PROXY`` are respected.
-    If the environment declares a proxy scheme this httpx build cannot use
-    (for example ``socks://`` without the ``socksio`` package), fall back to
-    a direct client so the update fails with a clear network error instead of
-    crashing the whole application. Proxies are never hard-coded or persisted.
+    Standard proxy environment variables are honoured. Authentication is
+    resolved at client construction time from the supplied token provider;
+    the token is never logged or persisted by the update subsystem.
     """
-    kwargs = dict(timeout=timeout, follow_redirects=True,
-                  headers={"User-Agent": USER_AGENT})
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+    }
+    token = token_provider() if token_provider else None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    kwargs = dict(
+        timeout=timeout,
+        follow_redirects=True,
+        headers=headers,
+    )
     try:
         return httpx.Client(**kwargs, trust_env=True)
     except ValueError:

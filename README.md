@@ -183,10 +183,20 @@ Apply-on-restart for JPNH core (source/dev installs):
     `.jpnh-pending-apply.json` marker, the app relaunches, and the updater swaps
     the staged checkout in (backing up the current tree to the rollback dir,
     health-checking, and rolling back if the swap fails). A packaged
-    (AppImage/deb) install does not self-swap — it points you at the new
-    release instead. AppImage installs can additionally be updated *in place* by
-    an external updater that atomically replaces the running AppImage and keeps
-    the previous one as `<name>.old` until the new build starts successfully.
+    (AppImage/deb) install does not self-swap the source tree — it is updated
+    from the packaged release instead.
+  - **AppImage self-update keeps the Ubuntu menu launcher working.** While
+    running as an AppImage, the Updates view offers **Download AppImage →
+    Restart & Apply**: the release's `.AppImage` asset is downloaded into the
+    update cache, SHA256-checked, and written to the pending-apply marker. On
+    the next launch the startup updater resolves the *installed* AppImage — the
+    file the desktop entry (`~/.local/share/applications/jpnh.desktop`) runs,
+    falling back to `$APPIMAGE` — and atomically replaces it: the old binary is
+    preserved as `<name>.old`, the new file is verified (exists, executable,
+    SHA256 matches) before the swap is accepted, any failure restores the old
+    binary, and the `<name>.old` is removed only after the new build has started
+    successfully. The desktop entry is never edited, so the menu keeps launching
+    the same stable path with no duplicate entries.
   - Untracked or locally-modified installs require explicit confirmation and
     are skipped by `update-all`.
   - Every apply creates a backup (state files + project copy, credential *keys*

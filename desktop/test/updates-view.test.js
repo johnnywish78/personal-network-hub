@@ -24,6 +24,14 @@ test("updates view exposes the event-driven flow", () => {
   assert.match(updatesSrc, /Check for Updates/, "check flow present");
 });
 
+test("updates view exposes the installed-AppImage self-update flow", () => {
+  assert.match(updatesSrc, /Download AppImage/, "AppImage download action present");
+  assert.match(updatesSrc, /Restart & Apply/, "AppImage apply action present");
+  assert.match(updatesSrc, /apply-appimage/, "calls the apply-appimage endpoint");
+  assert.match(updatesSrc, /stage-appimage/, "calls the stage-appimage endpoint");
+  assert.match(updatesSrc, /installed AppImage:/, "shows the installed AppImage path");
+});
+
 test("updates view shows honest progress without fake percentages", () => {
   assert.match(updatesSrc, /spinner/, "indeterminate spinner present");
   assert.doesNotMatch(updatesSrc, /\d+\s*%/, "no fake percentage labels");
