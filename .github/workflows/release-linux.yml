@@ -1,0 +1,89 @@
+name: Release Linux
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Build Linux release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/pip install pyinstaller
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Flutter Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libgtk-3-dev \
+            liblzma-dev
+
+      - name: Flutter dependencies
+        working-directory: third_party/network-checker
+        run: flutter pub get
+
+      - name: Run backend tests
+        run: .venv/bin/python -m pytest -q
+
+      - name: Run desktop tests
+        working-directory: desktop
+        run: npm test
+
+      - name: Build Linux release
+        working-directory: desktop
+        run: npm run dist:linux
+
+      - name: Verify artifacts
+        run: |
+          test -f "dist/Johnny Network Hub-0.1.0-linux-x86_64.AppImage"
+          test -f "dist/Johnny Network Hub-0.1.0-linux-amd64.deb"
+          ls -lh dist/*.AppImage dist/*.deb
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/Johnny Network Hub-0.1.0-linux-x86_64.AppImage" \
+            "dist/Johnny Network Hub-0.1.0-linux-amd64.deb" \
+            --title "Johnny Personal Network Hub ${GITHUB_REF_NAME}" \
+            --generate-notes
