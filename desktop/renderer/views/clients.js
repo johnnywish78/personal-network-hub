@@ -7,11 +7,19 @@ window.Views.clients = {
     const { el, card, badge, statusDot, toast, field, openModal, closeModal } = window.ui;
     const data = await window.api.get("/clients");
 
+    const CLIENT_BRAND_ICONS = { v2rayN: "v2rayn", hiddify: "hiddify", v2box: "v2box" };
+
     const c = card("Client Applications");
     const body = el("div");
     data.clients.forEach((cl) => {
       const line = el("div", "provider-card mb");
       const head = el("div", "head");
+      const brandKey = CLIENT_BRAND_ICONS[cl.id];
+      if (brandKey && window.JpnhIcons) {
+        const logo = el("span", "brand-logo");
+        logo.innerHTML = window.JpnhIcons.brandImg(brandKey, 32);
+        head.appendChild(logo);
+      }
       head.appendChild(el("h3", null, cl.name));
       head.appendChild(badge(cl.detected ? "Detected" : "Not found", cl.detected ? "ok" : "muted"));
       line.appendChild(head);

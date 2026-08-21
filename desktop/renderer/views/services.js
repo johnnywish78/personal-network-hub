@@ -28,6 +28,20 @@ const SERVICE_MANAGE_VIEW = {
   xray: "xray",
 };
 
+const SERVICE_BRAND_ICONS = {
+  github: "github",
+  cloudflare: "cloudflare",
+  "bpb-worker-panel": "bpb",
+  "bpb-wizard": "bpb",
+  zeus: "zeus",
+  rvg: "rvg",
+  aether: "aether",
+  nova: "nova",
+  railway: "railway",
+  "network-checker": "network-checker",
+  xray: "xray",
+};
+
 function statusLabel(status) {
   return {
     ok: "ok",
@@ -79,7 +93,16 @@ function serviceCard(service, { onChanged }) {
   const { el, badge, toast, confirmDialog, openModal, closeModal, field } = window.ui;
   const card = el("div", "service-card");
   const head = el("div", "service-head");
-  head.appendChild(el("span", "service-icon", service.icon || "▧"));
+
+  const brandKey = SERVICE_BRAND_ICONS[service.id];
+  const iconSpan = el("span", "service-icon" + (brandKey ? " brand-icon" : ""));
+  if (brandKey && window.JpnhIcons) {
+    iconSpan.innerHTML = window.JpnhIcons.brandImg(brandKey, 32);
+  } else {
+    iconSpan.textContent = service.icon || "▧";
+  }
+  head.appendChild(iconSpan);
+
   const titleWrap = el("div", "service-title");
   titleWrap.appendChild(el("h3", null, service.name));
   titleWrap.appendChild(el("div", "meta mono", service.type || service.id));

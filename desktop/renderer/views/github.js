@@ -9,7 +9,14 @@ window.Views.github = {
 
     const authCard = card("Authentication");
     const authBody = el("div");
+    const ghHead = el("div", "row mb");
+    if (window.JpnhIcons) {
+      const ghLogo = el("span", "brand-logo");
+      ghLogo.innerHTML = window.JpnhIcons.brandImg("github", 32, 1.3);
+      ghHead.appendChild(ghLogo);
+    }
     if (!status.configured) {
+      authBody.appendChild(ghHead);
       authBody.appendChild(el("p", "muted mb", "No token configured. Optional, but recommended for higher rate limits."));
       const btn = el("button", "btn primary", "Set Token");
       btn.addEventListener("click", () => window.tokenModal("github", "/github/auth"));

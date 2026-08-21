@@ -38,6 +38,12 @@ window.Views.dashboard = {
     Object.entries(data.providers || {}).forEach(([key, p]) => {
       const pc = el("div", "provider-card");
       const head = el("div", "head");
+      const brandKey = { "bpb-worker-panel": "bpb", "bpb-wizard": "bpb", zeus: "zeus", rvg: "rvg", aether: "aether", nova: "nova" }[key];
+      if (brandKey && window.JpnhIcons) {
+        const logo = el("span", "brand-logo");
+        logo.innerHTML = window.JpnhIcons.brandImg(brandKey, 32);
+        head.appendChild(logo);
+      }
       head.appendChild(el("h3", null, p.display_name || key));
       head.appendChild(statusDot(p.status));
       pc.appendChild(head);

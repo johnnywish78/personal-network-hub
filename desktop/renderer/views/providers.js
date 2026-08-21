@@ -9,9 +9,20 @@ window.Views.providers = {
     const statusData = (await window.api.get("/providers/status")).providers || {};
     const grid = el("div", "card-grid");
 
+    const PROVIDER_BRAND_ICONS = {
+      "bpb-worker-panel": "bpb", "bpb-wizard": "bpb", zeus: "zeus",
+      rvg: "rvg", aether: "aether", nova: "nova",
+    };
+
     data.providers.forEach((p) => {
       const pc = el("div", "provider-card");
       const head = el("div", "head");
+      const brandKey = PROVIDER_BRAND_ICONS[p.name];
+      if (brandKey && window.JpnhIcons) {
+        const logo = el("span", "brand-logo");
+        logo.innerHTML = window.JpnhIcons.brandImg(brandKey, 32);
+        head.appendChild(logo);
+      }
       head.appendChild(el("h3", null, p.display_name || p.name));
       const st = statusData[p.name];
       head.appendChild(badge(st ? st.status : "unknown", st ? st.status : null));

@@ -2,16 +2,16 @@
 
 (function () {
   const NAV = [
-    { id: "dashboard", label: "Dashboard", icon: "▦" },
-    { id: "browser", label: "Browser", icon: "⟐" },
-    { id: "services", label: "Services", icon: "▤" },
-    { id: "checker", label: "Network Checker", icon: "◈" },
-    { id: "network", label: "Network", icon: "⛨" },
-    { id: "configs", label: "Configs", icon: "⚙" },
-    { id: "xray", label: "Xray", icon: "◎" },
-    { id: "updates", label: "Updates", icon: "⇅" },
-    { id: "clients", label: "Clients", icon: "▣" },
-    { id: "settings", label: "Settings", icon: "⚑" },
+    { id: "dashboard", label: "Dashboard", icon: "dashboard" },
+    { id: "browser", label: "Browser", icon: "browser" },
+    { id: "services", label: "Services", icon: "services" },
+    { id: "checker", label: "Network Checker", icon: "checker" },
+    { id: "network", label: "Network", icon: "network" },
+    { id: "configs", label: "Configs", icon: "configs" },
+    { id: "xray", label: "Xray", icon: "xray" },
+    { id: "updates", label: "Updates", icon: "updates" },
+    { id: "clients", label: "Clients", icon: "clients" },
+    { id: "settings", label: "Settings", icon: "settings" },
   ];
 
   let current = "dashboard";
@@ -21,7 +21,15 @@
     NAV.forEach((item) => {
       const btn = window.ui.el("button", "nav-item");
       btn.dataset.view = item.id;
-      btn.innerHTML = `<span>${item.icon}</span><span>${item.label}</span>`;
+      let iconHtml;
+      if (item.id === "xray") {
+        iconHtml = window.JpnhIcons
+          ? `<img src="assets/icons/xray.png" width="22" height="22" alt="Xray" style="object-fit:contain" />`
+          : "";
+      } else {
+        iconHtml = window.JpnhIcons ? window.JpnhIcons.navIcon(item.icon, 22) : "";
+      }
+      btn.innerHTML = `<span class="nav-icon">${iconHtml}</span><span>${item.label}</span>`;
       btn.addEventListener("click", () => navigate(item.id));
       nav.appendChild(btn);
     });
@@ -177,18 +185,6 @@
     }
   }
 
-  // ---- Topbar clock (date / weekday / time) ----
-  function updateClock() {
-    const now = new Date();
-    const date = document.getElementById("clock-date");
-    const weekday = document.getElementById("clock-weekday");
-    const time = document.getElementById("clock-time");
-    if (!date || !weekday || !time) return;
-    weekday.textContent = now.toLocaleDateString(undefined, { weekday: "short" });
-    date.textContent = now.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-    time.textContent = now.toLocaleTimeString();
-  }
-
   // ---- Sidebar uptime (backend process uptime) ----
   function formatUptime(sec) {
     sec = Math.max(0, Math.floor(sec));
@@ -215,21 +211,41 @@
     }
   }
 
-  // ---- Theme toggle (day / night) ----
-  function updateThemeBtn(theme) {
+  // ---- Top-center clock ----
+  function updateClock() {
+    const now = new Date();
+    const weekday = document.getElementById("clock-weekday");
+    const date = document.getElementById("clock-date");
+    const time = document.getElementById("clock-time");
+    if (weekday) weekday.textContent = now.toLocaleDateString("en-US", { weekday: "long" });
+    if (date) date.textContent = now.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+    if (time) time.textContent = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  // ---- Theme toggle ----
+  function updateThemeBtn() {
     const btn = document.getElementById("btn-theme");
     if (!btn) return;
-    if (theme === "dark") {
-      btn.textContent = "☀";
-      btn.title = "Switch to light theme";
+    const theme = window.Theme ? window.Theme.getTheme() : "dark";
+    if (window.JpnhIcons) {
+      btn.innerHTML = theme === "dark" ? window.JpnhIcons.utility.sun : window.JpnhIcons.utility.moon;
     } else {
-      btn.textContent = "☾";
-      btn.title = "Switch to dark theme";
+      btn.textContent = theme === "dark" ? "\u2600" : "\u263E";
+    }
+    btn.title = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  }
+
+  // ---- Refresh button icon ----
+  function renderRefreshBtn() {
+    const btn = document.getElementById("btn-refresh");
+    if (btn && window.JpnhIcons) {
+      btn.innerHTML = window.JpnhIcons.utility.refresh;
     }
   }
 
   document.addEventListener("DOMContentLoaded", () => {
     buildNav();
+    renderRefreshBtn();
     window.api.init().then(() => {
       checkBackend();
       navigate("dashboard");
@@ -238,11 +254,17 @@
       setInterval(updateUptime, 5000);
     });
 
+    // Top-center clock
     updateClock();
     setInterval(updateClock, 1000);
-    updateThemeBtn(window.Theme ? window.Theme.getTheme() : "dark");
-    window.Theme.onChange((mode) => updateThemeBtn(window.Theme.getTheme()));
+
+    // Theme toggle
+    updateThemeBtn();
+    if (window.Theme) {
+      window.Theme.onChange(() => updateThemeBtn());
+    }
     document.getElementById("btn-theme").addEventListener("click", () => {
+      if (!window.Theme) return;
       const current = window.Theme.getTheme();
       window.Theme.setMode(current === "dark" ? "light" : "dark");
     });

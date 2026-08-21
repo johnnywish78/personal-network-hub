@@ -16,6 +16,13 @@ window.Views.xray = {
       if (sub) s.appendChild(el("div", "stat-sub", sub));
       return s;
     };
+    if (window.JpnhIcons) {
+      const xLogo = el("div", "row mb");
+      const xBrand = el("span", "brand-logo");
+      xBrand.innerHTML = window.JpnhIcons.brandImg("xray", 36);
+      xLogo.appendChild(xBrand);
+      statGrid.appendChild(xLogo);
+    }
     statGrid.appendChild(stat("Installed", status.installed ? "Yes" : "No"));
     statGrid.appendChild(stat("Status", status.running ? "Running" : "Stopped"));
     statGrid.appendChild(stat("Version", status.version || "-"));

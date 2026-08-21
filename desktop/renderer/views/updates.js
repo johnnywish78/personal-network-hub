@@ -76,11 +76,23 @@ const cache = (function () {
   };
 })();
 
+const PROJECT_BRAND_ICONS = {
+  "jpnh-core": "jpnh",
+  "network-checker": "network-checker",
+};
+
 function projectCard(project, onChanged) {
   const { el, toast } = window.ui;
   const card = el("div", "provider-card");
   const head = el("div", "head");
-  head.appendChild(el("span", "service-icon", project.icon || "⇅"));
+  const brandKey = PROJECT_BRAND_ICONS[project.id];
+  if (brandKey && window.JpnhIcons) {
+    const logo = el("span", "brand-logo");
+    logo.innerHTML = window.JpnhIcons.brandImg(brandKey, 32);
+    head.appendChild(logo);
+  } else {
+    head.appendChild(el("span", "service-icon", project.icon || "⇅"));
+  }
   const titleWrap = el("div");
   titleWrap.appendChild(el("h3", null, project.name));
   const repo = project.repository

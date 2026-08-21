@@ -10,7 +10,14 @@ window.Views.cloudflare = {
     // Auth card
     const authCard = card("Authentication");
     const authBody = el("div");
+    const cfHead = el("div", "row mb");
+    if (window.JpnhIcons) {
+      const cfLogo = el("span", "brand-logo");
+      cfLogo.innerHTML = window.JpnhIcons.brandImg("cloudflare", 32);
+      cfHead.appendChild(cfLogo);
+    }
     if (!status.configured) {
+      authBody.appendChild(cfHead);
       authBody.appendChild(el("p", "muted mb", "No API token configured. Tokens are stored in the local secure vault."));
       const btn = el("button", "btn primary", "Set API Token");
       btn.addEventListener("click", () => tokenModal("cloudflare", "/cloudflare/auth"));

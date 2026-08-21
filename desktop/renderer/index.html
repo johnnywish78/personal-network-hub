@@ -28,14 +28,16 @@
     <main class="main">
       <header class="topbar">
         <h1 id="view-title">Dashboard</h1>
-        <div id="clock" class="topbar-center">
-          <span id="clock-weekday" class="clock-item"></span>
-          <span id="clock-date" class="clock-item"></span>
-          <span id="clock-time" class="clock-item clock-time"></span>
+        <div class="topbar-center">
+          <div class="topbar-clock">
+            <span id="clock-weekday"></span>
+            <span id="clock-date"></span>
+            <span id="clock-time"></span>
+          </div>
         </div>
         <div class="topbar-actions">
-          <button id="btn-theme" class="btn ghost" title="Toggle dark / light theme">☀</button>
-          <button id="btn-refresh" class="btn ghost" title="Refresh">⟳ Refresh</button>
+          <button id="btn-theme" class="btn ghost icon-btn" title="Toggle dark / light theme"></button>
+          <button id="btn-refresh" class="btn ghost icon-btn" title="Refresh"></button>
           <button id="btn-logs" class="btn ghost" title="View logs">Logs</button>
         </div>
       </header>
@@ -65,6 +67,7 @@
     </div>
   </div>
 
+  <script src="icons.js"></script>
   <script src="components/theme.js"></script>
   <script src="state/api.js"></script>
   <script src="components/ui.js"></script>

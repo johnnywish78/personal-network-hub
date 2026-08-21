@@ -9,7 +9,14 @@ window.Views.railway = {
 
     const authCard = card("Authentication");
     const authBody = el("div");
+    const rwHead = el("div", "row mb");
+    if (window.JpnhIcons) {
+      const rwLogo = el("span", "brand-logo");
+      rwLogo.innerHTML = window.JpnhIcons.brandImg("railway", 32);
+      rwHead.appendChild(rwLogo);
+    }
     if (!status.configured) {
+      authBody.appendChild(rwHead);
       authBody.appendChild(el("p", "muted mb", "No API token configured. Tokens are stored in the local secure vault."));
       const btn = el("button", "btn primary", "Set API Token");
       btn.addEventListener("click", () => window.tokenModal("railway", "/railway/auth"));

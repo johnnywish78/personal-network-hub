@@ -337,8 +337,15 @@ window.Views.checker = {
     // --- Bundled app manage ---
     const manage = card("Bundled Network Checker App");
     const manageBody = el("div");
-    manageBody.appendChild(el("p", "muted",
+    const ncHead = el("div", "row mb");
+    if (window.JpnhIcons) {
+      const ncLogo = el("span", "brand-logo");
+      ncLogo.innerHTML = window.JpnhIcons.brandImg("network-checker", 36);
+      ncHead.appendChild(ncLogo);
+    }
+    ncHead.appendChild(el("p", "muted",
       "Launch the original Flutter app bundled with JPNH. It ships all upstream tools, including SMS Encoder (Android-only)."));
+    manageBody.appendChild(ncHead);
     const manageRow = el("div", "row");
     const launch = el("button", "btn primary", "Launch Network Checker");
     launch.addEventListener("click", () => {
