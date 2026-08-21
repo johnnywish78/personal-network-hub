@@ -37,6 +37,12 @@ class HealthCheckManager:
         """
         checks = []
         for name in project.health_checks:
+            # Packaged JPNH contains the compiled Network Checker bundle,
+            # not the upstream Flutter source tree.
+            if (getattr(sys, "frozen", False)
+                    and project.id == "network-checker"
+                    and name == "required-files"):
+                continue
             if name not in KNOWN_CHECKS:
                 checks.append({"name": name, "ok": False, "detail": "unknown health check"})
                 continue

@@ -99,7 +99,19 @@ function projectCard(project, onChanged) {
     parts.push("path: " + project.install_path);
   }
   if (project.current && project.current.install_path) {
-    parts.push("installed: " + (project.current.installed ? "yes" : "no"));
+    const bundledNetworkChecker =
+      project.id === "network-checker" &&
+      project.health &&
+      project.health.checks &&
+      project.health.checks.some(
+        (check) => check.name === "network-checker-bundle" && check.ok
+      );
+
+    if (bundledNetworkChecker) {
+      parts.push("bundled: yes");
+    } else {
+      parts.push("installed: " + (project.current.installed ? "yes" : "no"));
+    }
   }
   if (project.last_update) parts.push("updated: " + String(project.last_update).slice(0, 16).replace("T", " "));
   meta.textContent = parts.join("  ·  ");

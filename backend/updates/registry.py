@@ -58,6 +58,8 @@ BUILTIN_PROJECTS: list[dict[str, Any]] = [
         "build_strategy": "network-checker",
         "version_detection": "file",
         "current_version_file": "pubspec.yaml",
+        "release_only": True,
+        "staging_only": False,
         "rollback_strategy": "backup",
         "exclude_backup": ["build", ".dart_tool", ".git", ".flutter-plugins-dependencies"],
         "health_checks": ["required-files", "network-checker-bundle"],
