@@ -82,6 +82,11 @@ class CdnConfigScanController extends ChangeNotifier {
   List<String> get parsedIps => _parsedIps;
   int get parsedIpCount => _parsedIps.length;
 
+  bool _isParsingIps = false;
+  bool get isParsingIps => _isParsingIps;
+  int _ipParseGeneration = 0;
+  bool _disposed = false;
+
   // Scan state
   CdnScanConfig _scanConfig = const CdnScanConfig();
   CdnScanConfig get scanConfig => _scanConfig;
@@ -360,10 +365,20 @@ class CdnConfigScanController extends ChangeNotifier {
       _originalPort != null &&
       _configError == null;
 
-  /// Update IP input
-  void updateIpInput(String input) {
+  /// Update IP input and parse CIDR ranges off the UI thread.
+  Future<void> updateIpInput(String input) async {
     _ipInput = input;
-    _parsedIps = CdnConfigScanner.parseIpInput(input);
+    final generation = ++_ipParseGeneration;
+    _isParsingIps = true;
+    notifyListeners();
+
+    final parsed = input.trim().isEmpty
+        ? <String>[]
+        : await compute(CdnConfigScanner.parseIpInput, input);
+
+    if (_disposed || generation != _ipParseGeneration) return;
+    _parsedIps = parsed;
+    _isParsingIps = false;
     notifyListeners();
   }
 
@@ -385,7 +400,12 @@ class CdnConfigScanController extends ChangeNotifier {
 
   /// Start scanning
   Future<void> startScan() async {
-    if (_isScanning || _parsedConfig == null || _parsedIps.isEmpty) return;
+    if (_isScanning ||
+        _isParsingIps ||
+        _parsedConfig == null ||
+        _parsedIps.isEmpty) {
+      return;
+    }
 
     _isPreparingScan = true;
     _isScanning = true;
@@ -479,6 +499,8 @@ class CdnConfigScanController extends ChangeNotifier {
     _originalPort = null;
     _ipInput = '';
     _parsedIps = [];
+    _isParsingIps = false;
+    _ipParseGeneration++;
     _scannedCount = 0;
     _successCount = 0;
     _results = [];
@@ -515,6 +537,8 @@ class CdnConfigScanController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _ipParseGeneration++;
     // Use synchronous cleanup since dispose can't be async
     _scanSubscription?.cancel();
     _scanner?.dispose();

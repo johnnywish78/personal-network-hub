@@ -307,7 +307,7 @@ class ProtocolAccessibilityService {
         final request = curl.Request(
           url: 'https://$domain',
           method: 'GET',
-          httpVersions: [curl.HTTPVersion.http3],
+          httpVersion: curl.HTTPVersion.http3,
           verifySSL: false,
           connectTimeout: timeout,
           timeout: timeout + const Duration(seconds: 2),

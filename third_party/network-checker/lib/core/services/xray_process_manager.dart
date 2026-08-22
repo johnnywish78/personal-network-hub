@@ -122,26 +122,111 @@ class XrayProcessManager {
     }
   }
 
-  /// Extract the original outbound address from config
-  String? extractOutboundAddress(Map<String, dynamic> config) {
+  static const _proxyProtocols = {
+    'vless',
+    'vmess',
+    'trojan',
+    'shadowsocks',
+    'socks',
+    'http',
+  };
+
+  /// Find the proxy outbound (tagged "proxy", otherwise first proxy protocol).
+  Map<String, dynamic>? _findProxyOutbound(Map<String, dynamic> config) {
     final outbounds = config['outbounds'] as List<dynamic>?;
     if (outbounds == null || outbounds.isEmpty) return null;
 
-    // Find the proxy outbound (usually the first one or tagged as "proxy")
-    for (final outbound in outbounds) {
-      final map = outbound as Map<String, dynamic>;
-      final protocol = map['protocol'] as String?;
+    Map<String, dynamic>? taggedProxy;
+    Map<String, dynamic>? firstProtocolMatch;
 
-      if (protocol == 'vless' || protocol == 'vmess' || protocol == 'trojan') {
-        final settings = map['settings'] as Map<String, dynamic>?;
-        final vnext = settings?['vnext'] as List<dynamic>?;
-        if (vnext != null && vnext.isNotEmpty) {
-          final server = vnext[0] as Map<String, dynamic>;
-          return server['address'] as String?;
-        }
+    for (final outbound in outbounds) {
+      if (outbound is! Map<String, dynamic>) continue;
+      final tag = outbound['tag'] as String?;
+      final protocol = outbound['protocol'] as String?;
+
+      if (tag == 'proxy') {
+        taggedProxy = outbound;
+      }
+      if (protocol != null &&
+          _proxyProtocols.contains(protocol) &&
+          firstProtocolMatch == null) {
+        firstProtocolMatch = outbound;
       }
     }
+
+    return taggedProxy ?? firstProtocolMatch;
+  }
+
+  /// Read server address from flattened settings, vnext, or servers.
+  String? _readOutboundAddress(Map<String, dynamic> outbound) {
+    final settings = outbound['settings'];
+    if (settings is! Map<String, dynamic>) return null;
+
+    // New Xray flattened format: settings.address
+    final flatAddress = settings['address'];
+    if (flatAddress is String && flatAddress.isNotEmpty) {
+      return flatAddress;
+    }
+
+    // Classic vless/vmess: settings.vnext[0].address
+    final vnext = settings['vnext'];
+    if (vnext is List && vnext.isNotEmpty) {
+      final server = vnext.first;
+      if (server is Map<String, dynamic>) {
+        final address = server['address'];
+        if (address is String && address.isNotEmpty) return address;
+      }
+    }
+
+    // Classic trojan/ss/socks/http: settings.servers[0].address
+    final servers = settings['servers'];
+    if (servers is List && servers.isNotEmpty) {
+      final server = servers.first;
+      if (server is Map<String, dynamic>) {
+        final address = server['address'];
+        if (address is String && address.isNotEmpty) return address;
+      }
+    }
+
     return null;
+  }
+
+  /// Write server address into the same location the config used.
+  bool _writeOutboundAddress(Map<String, dynamic> outbound, String newAddress) {
+    final settings = outbound['settings'];
+    if (settings is! Map<String, dynamic>) return false;
+
+    if (settings['address'] is String) {
+      settings['address'] = newAddress;
+      return true;
+    }
+
+    final vnext = settings['vnext'];
+    if (vnext is List && vnext.isNotEmpty) {
+      final server = vnext.first;
+      if (server is Map<String, dynamic>) {
+        server['address'] = newAddress;
+        return true;
+      }
+    }
+
+    final servers = settings['servers'];
+    if (servers is List && servers.isNotEmpty) {
+      final server = servers.first;
+      if (server is Map<String, dynamic>) {
+        server['address'] = newAddress;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Extract the original outbound address from config
+  String? extractOutboundAddress(Map<String, dynamic> config) {
+    final outbound = _findProxyOutbound(config);
+    if (outbound == null) return null;
+    return _readOutboundAddress(outbound);
   }
 
   /// Extract the inbound port from config
@@ -181,24 +266,82 @@ class XrayProcessManager {
       }
     }
 
-    // Modify outbound address
-    final outbounds = config['outbounds'] as List<dynamic>;
-    for (final outbound in outbounds) {
-      final map = outbound as Map<String, dynamic>;
-      final protocol = map['protocol'] as String?;
+    // Modify outbound address in whatever layout this config uses
+    final outbound = _findProxyOutbound(config);
+    if (outbound != null) {
+      _writeOutboundAddress(outbound, newAddress);
+    }
 
-      if (protocol == 'vless' || protocol == 'vmess' || protocol == 'trojan') {
-        final settings = map['settings'] as Map<String, dynamic>;
-        final vnext = settings['vnext'] as List<dynamic>;
-        if (vnext.isNotEmpty) {
-          final server = vnext[0] as Map<String, dynamic>;
-          server['address'] = newAddress;
+    // Client configs often reference custom geo dat files we do not ship
+    // (e.g. ext:geoip-only-cn-private.dat:private). Map those onto the
+    // bundled geoip.dat / geosite.dat so xray can start.
+    _rewriteExternalGeoRefs(config);
+
+    return config;
+  }
+
+  /// Rewrite `ext:custom.dat:tag` entries to `geoip:tag` / `geosite:tag`.
+  void _rewriteExternalGeoRefs(Map<String, dynamic> config) {
+    final routing = config['routing'];
+    if (routing is Map<String, dynamic>) {
+      final rules = routing['rules'];
+      if (rules is List) {
+        for (final rule in rules) {
+          if (rule is! Map<String, dynamic>) continue;
+          _rewriteExtGeoList(rule, 'ip', 'geoip');
+          _rewriteExtGeoList(rule, 'source', 'geoip');
+          _rewriteExtGeoList(rule, 'domain', 'geosite');
         }
-        break;
       }
     }
 
-    return config;
+    final dns = config['dns'];
+    if (dns is Map<String, dynamic>) {
+      final servers = dns['servers'];
+      if (servers is List) {
+        for (final server in servers) {
+          if (server is! Map<String, dynamic>) continue;
+          _rewriteExtGeoList(server, 'domains', 'geosite');
+          _rewriteExtGeoList(server, 'expectedIPs', 'geoip');
+          _rewriteExtGeoList(server, 'unexpectedIPs', 'geoip');
+        }
+      }
+    }
+  }
+
+  void _rewriteExtGeoList(
+    Map<String, dynamic> obj,
+    String key,
+    String builtinPrefix,
+  ) {
+    final list = obj[key];
+    if (list is! List) return;
+    for (var i = 0; i < list.length; i++) {
+      final value = list[i];
+      if (value is! String) continue;
+      final rewritten = _rewriteExtGeoRef(value, builtinPrefix);
+      if (rewritten != null) list[i] = rewritten;
+    }
+  }
+
+  /// Convert `ext:file.dat:tag` into a builtin geoip/geosite selector.
+  String? _rewriteExtGeoRef(String value, String builtinPrefix) {
+    if (!value.startsWith('ext:')) return null;
+    final rest = value.substring(4);
+    final colon = rest.lastIndexOf(':');
+    if (colon <= 0 || colon >= rest.length - 1) return null;
+
+    final file = rest.substring(0, colon).toLowerCase();
+    final tag = rest.substring(colon + 1);
+    if (tag.isEmpty) return null;
+
+    var prefix = builtinPrefix;
+    if (file.contains('geosite') || file.contains('dlc')) {
+      prefix = 'geosite';
+    } else if (file.contains('geoip')) {
+      prefix = 'geoip';
+    }
+    return '$prefix:$tag';
   }
 
   int _allocateRandomPort() {
@@ -262,6 +405,12 @@ class XrayProcessManager {
         xrayPath,
         ['-c', configPath],
         workingDirectory: xrayDir.path,
+        environment: {
+          // Android runs libxray.so from the APK native lib dir, which cannot
+          // hold geoip.dat. Point xray at the writable dir that has the assets.
+          'XRAY_LOCATION_ASSET': xrayDir.path,
+          'xray.location.asset': xrayDir.path,
+        },
       );
 
       if (kDebugMode && Platform.isAndroid) {

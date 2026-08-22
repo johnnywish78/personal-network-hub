@@ -172,9 +172,20 @@ class CdnConfigScanner {
     final ips = <String>[];
     final start = prefixLength >= 31 ? 0 : 1;
     final end = prefixLength >= 31 ? numHosts : numHosts - 1;
+    final usableCount = end - start;
 
-    for (var i = start; i < end; i++) {
-      final addr = networkAddr + i;
+    // Wide CDN presets (/16 and larger) would otherwise expand into hundreds of
+    // thousands of hosts and freeze Android. Sample evenly across the range.
+    const maxHostsPerCidr = 4096;
+    final step = usableCount > maxHostsPerCidr
+        ? usableCount / maxHostsPerCidr
+        : 1.0;
+    final count =
+        usableCount > maxHostsPerCidr ? maxHostsPerCidr : usableCount;
+
+    for (var i = 0; i < count; i++) {
+      final offset = start + (i * step).floor();
+      final addr = networkAddr + offset;
       final ip =
           '${(addr >> 24) & 0xFF}.${(addr >> 16) & 0xFF}.${(addr >> 8) & 0xFF}.${addr & 0xFF}';
       ips.add(ip);

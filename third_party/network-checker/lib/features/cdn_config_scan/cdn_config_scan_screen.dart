@@ -10,6 +10,7 @@ import 'dart:io';
 import '../../core/services/cdn_config_scanner.dart';
 import '../../core/theme/app_theme.dart';
 import 'cdn_config_scan_controller.dart';
+import 'data/cdn_scan_presets.dart';
 
 class CdnConfigScanScreen extends StatefulWidget {
   const CdnConfigScanScreen({super.key});
@@ -716,6 +717,12 @@ class _IpInputStepState extends State<_IpInputStep> {
     });
   }
 
+  void _applyPreset(CdnScanPreset preset, CdnConfigScanController controller) {
+    _debounceTimer?.cancel();
+    _ipController.text = preset.cidrs;
+    controller.updateIpInput(preset.cidrs);
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -727,31 +734,67 @@ class _IpInputStepState extends State<_IpInputStep> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Header
-              Row(
+              Text(
+                'Enter IP Addresses',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: colorScheme.onSurface,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'One IP or CIDR range per line',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Enter IP Addresses',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: colorScheme.onSurface,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'One IP or CIDR range per line',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
+                  MenuAnchor(
+                    style: MenuStyle(
+                      maximumSize: WidgetStatePropertyAll(
+                        Size(320, MediaQuery.sizeOf(context).height * 0.5),
+                      ),
                     ),
+                    builder: (context, menuController, child) {
+                      return FilledButton.tonalIcon(
+                        onPressed: () {
+                          if (menuController.isOpen) {
+                            menuController.close();
+                          } else {
+                            menuController.open();
+                          }
+                        },
+                        icon: const Icon(Icons.dns_outlined, size: 18),
+                        label: const Text('CDN presets'),
+                      );
+                    },
+                    menuChildren: [
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: MediaQuery.sizeOf(context).height * 0.5,
+                          minWidth: 240,
+                        ),
+                        child: SingleChildScrollView(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              for (final preset in cdnScanPresets)
+                                MenuItemButton(
+                                  onPressed: () =>
+                                      _applyPreset(preset, controller),
+                                  child: Text(preset.name),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                   FilledButton.tonalIcon(
                     onPressed: () async {
@@ -793,7 +836,7 @@ class _IpInputStepState extends State<_IpInputStep> {
               const SizedBox(height: 16),
 
               // IP count info
-              if (controller.parsedIpCount > 0)
+              if (controller.isParsingIps || controller.parsedIpCount > 0)
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -802,11 +845,23 @@ class _IpInputStepState extends State<_IpInputStep> {
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.info_outline, color: colorScheme.primary, size: 20),
+                      if (controller.isParsingIps)
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: colorScheme.primary,
+                          ),
+                        )
+                      else
+                        Icon(Icons.info_outline, color: colorScheme.primary, size: 20),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Parsed ${controller.parsedIpCount} IP addresses',
+                          controller.isParsingIps
+                              ? 'Parsing IP addresses...'
+                              : 'Parsed ${controller.parsedIpCount} IP addresses',
                           style: TextStyle(
                             color: colorScheme.primary,
                             fontWeight: FontWeight.w500,
@@ -830,9 +885,16 @@ class _IpInputStepState extends State<_IpInputStep> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: controller.parsedIpCount > 0 ? controller.nextStep : null,
+                      onPressed: !controller.isParsingIps &&
+                              controller.parsedIpCount > 0
+                          ? controller.nextStep
+                          : null,
                       icon: const Icon(Icons.play_arrow),
-                      label: Text('Start Scan (${controller.parsedIpCount} IPs)'),
+                      label: Text(
+                        controller.isParsingIps
+                            ? 'Parsing IPs...'
+                            : 'Start Scan (${controller.parsedIpCount} IPs)',
+                      ),
                     ),
                   ),
                 ],
