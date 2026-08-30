@@ -261,7 +261,11 @@
     // Theme toggle
     updateThemeBtn();
     if (window.Theme) {
-      window.Theme.onChange(() => updateThemeBtn());
+      window.Theme.onChange((m) => {
+        updateThemeBtn();
+        // Sync with browser settings
+        if (window.BrowserSettings) window.BrowserSettings.set("theme", m);
+      });
     }
     document.getElementById("btn-theme").addEventListener("click", () => {
       if (!window.Theme) return;

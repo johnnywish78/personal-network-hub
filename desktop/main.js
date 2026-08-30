@@ -3,10 +3,15 @@
 const { app, BrowserWindow, shell, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const { spawn } = require("child_process");
 
 const bm = require("./lib/backend-manager");
 const ncm = require("./lib/network-checker-manager");
 const updater = require("./lib/self-updater");
+const contextMenu = require("./lib/browser/context-menu");
+const browserDownloads = require("./lib/browser/downloads");
+const browserPermissions = require("./lib/browser/permissions");
+const browserHistory = require("./lib/browser/history");
 
 // On Linux, Electron derives the window WM_CLASS from app.name. The packaged
 // .desktop entry sets StartupWMClass=jpnh, so pin the name to match — otherwise
@@ -193,16 +198,38 @@ function createWindow() {
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith("file://")) {
-      event.preventDefault();
-      if (url.startsWith("http://") || url.startsWith("https://")) shell.openExternal(url);
-    }
+    // Allow the embedded Browser Hub to navigate normally.
+    // External URLs are handled by the browser view itself.
+    if (url.startsWith("file://")) return;
   });
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 }
 
 // ---- IPC ------------------------------------------------------------------
+
+ipcMain.handle("open-chrome", (_event, url) => {
+  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
+    return { ok: false, error: "invalid url" };
+  }
+
+  const chrome = "/usr/bin/google-chrome";
+  if (!fs.existsSync(chrome)) {
+    return { ok: false, error: "Google Chrome not found" };
+  }
+
+  try {
+    const child = spawn(chrome, [url], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    return { ok: true };
+  } catch (error) {
+    log("failed to launch Google Chrome:", error.message);
+    return { ok: false, error: error.message };
+  }
+});
 
 ipcMain.handle("open-external", (_event, url) => {
   if (typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"))) {
@@ -226,6 +253,100 @@ ipcMain.handle("network-checker-status", () => ({
 ipcMain.handle("app-quit", () => {
   quitCleanly();
   return { ok: true };
+});
+
+// ---- Browser IPC -----------------------------------------------------------
+
+ipcMain.handle("show-context-menu", async (event, options) => {
+  if (!mainWindow) return;
+  contextMenu.show(mainWindow, options.webviewId, {
+    linkURL: options.linkURL || "",
+    srcURL: options.srcURL || "",
+    mediaType: options.mediaType || "",
+    hasText: !!options.text,
+    selectionText: options.text || "",
+    isEditable: options.isEditable || false,
+    canGoBack: options.canGoBack || false,
+    canGoForward: options.canGoForward || false,
+  });
+});
+
+ipcMain.handle("context-menu-action", (event, data) => {
+  mainWindow.webContents.send("context-menu-action", data);
+});
+
+ipcMain.handle("download-url", async (event, { url }) => {
+  if (!mainWindow || !url) return { ok: false };
+  try {
+    mainWindow.webContents.session.downloadURL(url);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle("get-downloads", () => {
+  return browserDownloads.getAll();
+});
+
+ipcMain.handle("print-page", async () => {
+  if (!mainWindow) return;
+  const webContents = mainWindow.webContents;
+  webContents.print({ silent: false, printBackground: true });
+});
+
+ipcMain.handle("export-pdf", async () => {
+  if (!mainWindow) return { ok: false };
+  try {
+    const data = await mainWindow.webContents.printToPDF({
+      printBackground: true,
+      pageSize: "A4",
+    });
+    const { filePath } = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: "page.pdf",
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (filePath) {
+      require("fs").writeFileSync(filePath, data);
+      return { ok: true, path: filePath };
+    }
+    return { ok: false, error: "cancelled" };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle("clear-browser-data", async (event, { types }) => {
+  if (!mainWindow) return;
+  const session = mainWindow.webContents.session;
+  try {
+    if (types.includes("cache")) await session.clearCache();
+    if (types.includes("cookies")) {
+      await session.clearStorageData({ origins: session.getAllOrigins() });
+      await session.cookies.deleteAll();
+    }
+    if (types.includes("history")) browserHistory.clear();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle("get-history", (event, { query } = {}) => {
+  if (query) return browserHistory.search(query);
+  return browserHistory.getAll();
+});
+
+ipcMain.handle("add-history", (event, { url, title }) => {
+  browserHistory.add(url, title);
+});
+
+ipcMain.handle("clear-history", () => {
+  browserHistory.clear();
+});
+
+ipcMain.handle("respond-permission", (event, { id, granted }) => {
+  browserPermissions.respond(id, granted);
 });
 
 // ---- app lifecycle --------------------------------------------------------
@@ -268,6 +389,19 @@ app.whenReady().then(async () => {
   await startBackend();
   if (app.isQuitting) return;
   createWindow();
+
+  browserDownloads.init(mainWindow);
+  browserPermissions.setup(mainWindow);
+
+  // Intercept new-window requests from webviews and open them in tabs
+  mainWindow.webContents.on("did-attach-webview", (event, webContents) => {
+    webContents.setWindowOpenHandler(({ url }) => {
+      if (url && /^https?:\/\//i.test(url)) {
+        mainWindow.webContents.send("browser-open-in-tab", { url });
+      }
+      return { action: "deny" };
+    });
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

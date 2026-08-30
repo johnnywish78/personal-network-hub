@@ -171,22 +171,36 @@ window.ui = (function () {
     }
   }
 
-  // ---- Embedded browser (Browser Hub) ----
+  // ---- Browser -----------------------------------------------------------
   function openPanel(url) {
     return openBrowser(url);
   }
 
   function openBrowser(url, title) {
     if (!url) return;
+
     if (!/^https?:\/\//i.test(url)) {
-      toast(`Cannot open non-HTTP URL embedded: ${url}`, "warn");
+      toast(`Cannot open URL in Chrome: ${url}`, "warn");
       openExternal(url);
       return;
     }
-    if (window.BrowserHub && window.BrowserHub.queueOpen) {
-      window.BrowserHub.queueOpen(url, title || url);
+
+    if (window.jpnh && window.jpnh.openChrome) {
+      window.jpnh.openChrome(url).then((result) => {
+        if (!result || !result.ok) {
+          toast(
+            result && result.error
+              ? `Chrome could not be opened: ${result.error}`
+              : "Chrome could not be opened",
+            "warn"
+          );
+        }
+      }).catch(() => {
+        toast("Chrome could not be opened", "warn");
+      });
       return;
     }
+
     openExternal(url);
   }
 
